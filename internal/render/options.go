@@ -1,0 +1,67 @@
+package render
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/lvim-tech/mailforge/internal/config"
+)
+
+// OptionsRC renders the NeoMutt settings that come from mailforge's own config rather than from an
+// account.
+//
+// Its own file, and sourced BEFORE the user's settings.rc, for the same reason keys.rc is: what
+// this program manages has to be rewritable on every apply, and what the user writes by hand has to
+// win. A setting here is a starting point, not a cage — one line in their file overrides it.
+//
+// That ordering is also why the seed no longer carries `set editor`. The seeded line was mailforge's
+// own, it expanded $EDITOR once at parse time, and being in the user's file it beat anything this
+// program could later put right.
+func OptionsRC(c config.Config) string {
+	var b strings.Builder
+	b.WriteString(HeaderFromConfig)
+	b.WriteString("#\n")
+	b.WriteString("# Change these in mailforge, in the Settings tab. Anything you set in your own\n")
+	b.WriteString("# settings.rc is read after this file and therefore wins.\n\n")
+
+	if e := strings.TrimSpace(c.Editor); e != "" {
+		fmt.Fprintf(&b, "set editor = %s\n", quote(e))
+	} else {
+		// Said out loud rather than left as an empty file, because "nothing here" and "this
+		// program has no opinion here" look identical on disk and mean different things.
+		b.WriteString("# no editor set in mailforge — NeoMutt falls back to $VISUAL, $EDITOR, then vi\n")
+	}
+
+	// What the seeded sidebar_format needs to have anything to show. Written as a pair, because
+	// the interval alone is meaningless and the flag alone leaves NeoMutt's own minute in place
+	// — and a reader of this file should not have to know which of the two was left implicit.
+	b.WriteString("\n")
+	if c.SidebarCounts {
+		b.WriteString("set mail_check_stats\n")
+		fmt.Fprintf(&b, "set mail_check_stats_interval = %d\n", c.SidebarCountsEvery)
+	} else {
+		b.WriteString("unset mail_check_stats   # the sidebar's %N and %S have nothing to count\n")
+	}
+	// The three nested timers, written together because they are read together: NeoMutt waits
+	// `timeout` for a key, then looks for mail if `mail_check` has elapsed, and only inside that
+	// look are the counts recomputed if `mail_check_stats_interval` has. Each is a ceiling over
+	// the next. They stay three settings — a recount is real work on a large maildir and a
+	// new-mail check is not — and the interface shows what each one EFFECTIVELY comes to.
+	fmt.Fprintf(&b, "set timeout = %d\n", c.WakeEvery)
+	fmt.Fprintf(&b, "set mail_check = %d\n", c.CheckEvery)
+
+	// Do not stop for a key press after a shell command that WORKED.
+	//
+	// From NeoMutt's own source: it waits when `rc != 0 || wait_key`, so unsetting this removes
+	// the pause on success and keeps it on failure — which is the only time the output is worth
+	// reading. The fetch macro is the reason: pressing a key to fetch mail and then pressing
+	// another to get back to the mailbox is one key too many for something done all day.
+	b.WriteString("unset wait_key   # only pause after a command that failed\n")
+
+	return b.String()
+}
+
+// NeomuttOptionsInclude is the line that sources it, and its block belongs among the first.
+func NeomuttOptionsInclude(c config.Config) string {
+	return fmt.Sprintf("source %s/mailforge/options.rc\n", c.NeomuttDir)
+}

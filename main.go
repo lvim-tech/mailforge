@@ -1,0 +1,156 @@
+// mailforge sets up NeoMutt and keeps the mail accounts on this machine in agreement.
+//
+// The problem it exists for: one account's address appears three to eight times across five files
+// — the neomutt rc, the mbsync stanza, the maildir path, the password entry — and nothing keeps
+// them consistent. Hand-maintained, they drift: a password encrypted to a key that no longer
+// exists, a PassCmd commented out years ago, a Sent folder that was renamed on the server. Every
+// one of those is invisible until the day it matters.
+//
+// So the registry is the single source of truth and every file is its output. Nothing is written
+// until the account has been proved to work against the real servers.
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/lvim-tech/mailforge/internal/account"
+	"github.com/lvim-tech/mailforge/internal/config"
+	"github.com/lvim-tech/mailforge/internal/inbox"
+	"github.com/lvim-tech/mailforge/internal/setup"
+	"github.com/lvim-tech/mailforge/internal/sys"
+	"github.com/lvim-tech/mailforge/internal/ui"
+)
+
+// backupRoot is where a previous hand-made configuration was moved aside, if it was. Only ever
+// READ, and only for the colour scheme: carrying somebody's look across is worth doing, and
+// carrying their structure across would defeat the point of rebuilding it.
+func backupRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "NMUT_BCKP")
+}
+
+func main() {
+	// Hardening first, before anything can hold a password: it closes the paths by which memory
+	// reaches the disk without anyone choosing it, and the guarantee is only worth having if it
+	// is in place before the first secret exists.
+	sys.Harden()
+
+	c, err := config.Load()
+	if err != nil {
+		// Reported, not swallowed. A config that cannot be parsed means the program is about to
+		// behave as if fields the user set were never set, and finding that out later — from a
+		// file written to the wrong place — is much more expensive than reading a line now.
+		fmt.Fprintln(os.Stderr, "mailforge:", err)
+		fmt.Fprintln(os.Stderr, "  fix or move", config.Path(), "and start again")
+		os.Exit(1)
+	}
+
+	// `mailforge unread` — a number, and nothing else on stdout.
+	//
+	// A SUBCOMMAND rather than a second little program, because the answer depends on the
+	// registry: which accounts exist, where their maildirs are, what this server calls the spam
+	// folder. Anything outside this binary would have to carry a copy of all three and would be
+	// wrong the first time one of them moved — which is exactly what happened to the shell
+	// script a status bar, a launcher and an editor widget were all sharing.
+	if len(os.Args) > 1 && os.Args[1] == "unread" {
+		os.Exit(runUnread(c, os.Args[2:]))
+	}
+
+	// `mailforge fetch` — mbsync for every account, then whoever is watching is told.
+	//
+	// The timer and the key in NeoMutt both call this rather than mbsync directly, so the
+	// "and then tell the bar" half cannot end up on only one of the two paths.
+	if len(os.Args) > 1 && os.Args[1] == "fetch" {
+		os.Exit(setup.Fetch(c))
+	}
+
+	// First run: a machine with no config has no directories, no neomuttrc and nothing for the
+	// account wizard to write into. Doing it here rather than behind a screen the user has to
+	// find means the first thing they see is a program that already works — and every step is
+	// idempotent, so a second run of it is inert rather than destructive.
+	if !config.Exists() {
+		plan := setup.FirstRun(c, setup.CarrySource(backupRoot()))
+		for _, line := range setup.Describe(plan) {
+			fmt.Fprintln(os.Stderr, line)
+		}
+		if plan.Failed() {
+			fmt.Fprintln(os.Stderr, "mailforge: setup did not finish; nothing else will be attempted")
+			os.Exit(1)
+		}
+		if c2, err := config.Load(); err == nil {
+			c = c2
+		}
+	}
+
+	p := tea.NewProgram(ui.New(c), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "mailforge:", err)
+		os.Exit(1)
+	}
+}
+
+// runUnread prints the unread count. Plain by default, one line per account with --per-account.
+//
+// Failure prints NOTHING to stdout and returns non-zero: a status bar reading this substitutes its
+// own text for a command that failed, and a "0" on a broken setup is worse than an error — it is
+// the same thing the bar shows when the mail really has all been read.
+func runUnread(c config.Config, args []string) int {
+	for _, a := range args {
+		if a == "--watch" {
+			return watchUnread(c)
+		}
+	}
+
+	reg, err := account.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mailforge:", err)
+		return 1
+	}
+	total, per := inbox.Unread(c, reg.Accounts)
+
+	for _, a := range args {
+		if a == "--per-account" {
+			for _, p := range per {
+				fmt.Printf("%d\t%s\n", p.Unread, p.Address)
+			}
+			return 0
+		}
+	}
+	fmt.Println(total)
+	return 0
+}
+
+// watchUnread prints the count once, and again whenever it changes, until it is killed.
+//
+// A STREAM instead of a signal, and the reason is a bar that died. Waybar refreshes a module on
+// SIGRTMIN+N, but the default action for a real-time signal nothing is listening for is to
+// TERMINATE the process — so the same command that updates a correctly configured bar kills one
+// whose config was edited, or reloaded, or simply started before the module existed. That is not
+// a bug to be careful around; it is a mechanism that fails destructively, and it took the user's
+// desktop down every five minutes until the timer was found.
+//
+// Polling here rather than watching with inotify because the cost was measured, not guessed: one
+// pass over every maildir is a quarter of a millisecond, so two seconds between passes is a
+// rounding error, and there is no dependency and no watch to lose on a directory that gets
+// replaced underneath it.
+func watchUnread(c config.Config) int {
+	last := -1
+	for {
+		reg, err := account.Load()
+		if err == nil {
+			if total, _ := inbox.Unread(c, reg.Accounts); total != last {
+				last = total
+				fmt.Println(total)
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
