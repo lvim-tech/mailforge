@@ -1,11 +1,11 @@
 // Package store is mailforge's bridge to `pass`, the standard Unix password manager.
 //
-// Ported from mailforge's internal/passstore rather than rewritten. The care in it — the hand-made
+// Ported from keyforge's internal/passstore rather than rewritten. The care in it — the hand-made
 // pipe, the locked buffer, the refusal to let a password become an argument or an unwipeable Go
 // string — is reviewed code solving a problem both programs have, and a second implementation
 // would be a second set of edge cases around the same secret.
 //
-// WHY KEYFORGE DOES NOT STORE ANYTHING ITSELF. A password store is a small idea with a large
+// WHY MAILFORGE DOES NOT STORE ANYTHING ITSELF. A password store is a small idea with a large
 // surface: key derivation, an on-disk format, atomic writes, memory that must not be swapped or
 // dumped, a master secret whose handling decides everything. Writing another one would be the
 // opposite of "a layer over the tools" — it would be a new, unreviewed piece of cryptography sitting
@@ -137,26 +137,6 @@ func Entries() ([]Entry, error) {
 	return out, err
 }
 
-// Folders lists the distinct directories entries live in, so a form can show what conventions this
-// store already follows instead of asking the user to remember them.
-func Folders() []string {
-	entries, err := Entries()
-	if err != nil && len(entries) == 0 {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, e := range entries {
-		if e.Folder == "" || seen[e.Folder] {
-			continue
-		}
-		seen[e.Folder] = true
-		out = append(out, e.Folder)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // Exists reports whether an entry is already there, so a generated secret never silently replaces
 // one that is still in use somewhere.
 func Exists(name string) bool {
@@ -188,18 +168,23 @@ func ValidName(name string) error {
 	return nil
 }
 
-// Insert writes a freshly generated secret into the store. It refuses to overwrite.
-func Insert(name, secret string, meta map[string]string) error {
-	if err := ValidName(name); err != nil {
-		return err
-	}
-	if Exists(name) {
+// existence is what a write requires the store to look like: the guarantee Insert and Replace each
+// make, in the one form write can re-check for itself.
+type existence int
+
+const (
+	mustNotExist existence = iota
+	mustExist
+)
+
+func (e existence) check(name string) error {
+	switch {
+	case e == mustNotExist && Exists(name):
 		return fmt.Errorf("entry %q already exists — pick another name", name)
+	case e == mustExist && !Exists(name):
+		return fmt.Errorf("no entry %q", name)
 	}
-	return write(name, func(w io.Writer) error {
-		_, err := io.WriteString(w, secret)
-		return err
-	}, renderMeta(meta))
+	return nil
 }
 
 // InsertSecret writes a secret held in locked memory. It refuses to overwrite.
@@ -210,10 +195,7 @@ func InsertSecret(name string, secret *sys.Secret, meta map[string]string) error
 	if err := ValidName(name); err != nil {
 		return err
 	}
-	if Exists(name) {
-		return fmt.Errorf("entry %q already exists — pick another name", name)
-	}
-	return write(name, func(w io.Writer) error {
+	return write(name, mustNotExist, func(w io.Writer) error {
 		_, err := secret.WriteTo(w)
 		return err
 	}, renderMeta(meta))
@@ -225,10 +207,7 @@ func Replace(name string, secret *sys.Secret, meta map[string]string) error {
 	if err := ValidName(name); err != nil {
 		return err
 	}
-	if !Exists(name) {
-		return fmt.Errorf("no entry %q", name)
-	}
-	return write(name, func(w io.Writer) error {
+	return write(name, mustExist, func(w io.Writer) error {
 		_, err := secret.WriteTo(w)
 		return err
 	}, renderMeta(meta))
@@ -245,7 +224,14 @@ func Replace(name string, secret *sys.Secret, meta map[string]string) error {
 // --force is always given. Not to overwrite blindly — Insert and Replace have already decided that
 // question in Go, where the answer can be reported properly — but because without it `pass` asks
 // for confirmation on stdin, and the "y" it is waiting for would be read out of the password.
-func write(name string, secret func(io.Writer) error, trailer string) error {
+//
+// And because --force obeys whatever it finds, `want` is re-checked HERE, as late as it can be.
+// The caller's check happened before a decryption that may have waited on a pinentry; a second
+// mailforge, or a git pull into the store, can create or delete the entry inside that window and
+// turn "refuses to overwrite" into an overwrite with no error anywhere. This does not close the
+// race — only a lock on the store would — but it narrows it from seconds to microseconds and makes
+// the collision loud instead of silent.
+func write(name string, want existence, secret func(io.Writer) error, trailer string) error {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("pipe: %w", err)
@@ -256,6 +242,11 @@ func write(name string, secret func(io.Writer) error, trailer string) error {
 	cmd.Stderr = errb
 	cmd.Stdout = nil
 
+	if err := want.check(name); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
@@ -369,7 +360,7 @@ func ReplacePassword(name string, secret *sys.Secret) error {
 	if err != nil {
 		return err
 	}
-	return write(name, func(w io.Writer) error {
+	return write(name, mustExist, func(w io.Writer) error {
 		_, err := secret.WriteTo(w)
 		return err
 	}, trailer)
@@ -392,47 +383,6 @@ func Remove(name string) error {
 		return fmt.Errorf("pass rm: %s", firstLine(res.Stderr, "delete failed"))
 	}
 	return nil
-}
-
-// Move renames an entry, folders included — moving `websites/x/me` to `old/x/me` is how an account
-// gets retired without losing what its password was.
-func Move(from, to string) error {
-	if err := ValidName(from); err != nil {
-		return err
-	}
-	if err := ValidName(to); err != nil {
-		return err
-	}
-	if from == to {
-		return nil
-	}
-	if !Exists(from) {
-		return fmt.Errorf("no entry %q", from)
-	}
-	if Exists(to) {
-		return fmt.Errorf("entry %q already exists", to)
-	}
-	res, err := sys.Run("pass", "mv", from, to)
-	if err != nil {
-		return err
-	}
-	if !res.OK() {
-		return fmt.Errorf("pass mv: %s", firstLine(res.Stderr, "move failed"))
-	}
-	return nil
-}
-
-// CopyCmd builds the command that puts an entry's password on the clipboard.
-//
-// `pass show --clip` copies the first line and wipes the clipboard again after
-// PASSWORD_STORE_CLIP_TIME seconds (45 by default). The password is decrypted by gpg and handed to
-// the clipboard helper; mailforge never sees it, which is strictly better than reading it here and
-// copying it ourselves, and is why there is no "reveal" beside this.
-//
-// It is returned as a command rather than run, because gpg may need to ask for the passphrase and
-// pinentry-curses wants the real terminal. The caller hands this to tea.ExecProcess.
-func CopyCmd(name string) *exec.Cmd {
-	return sys.Interactive("pass", "show", "--clip", name)
 }
 
 // Reveal decrypts an entry and returns its password in locked memory.
@@ -487,8 +437,12 @@ func decrypt(name string) (*sys.Secret, error) {
 	// Our copy of the write end must go, or the read below never sees EOF.
 	_ = pw.Close()
 
-	// 4 KB is far more than any password and still one page of locked memory.
-	sec, err := sys.NewSecret(4096)
+	// 64 KB, not the 4 KB a password would need. What is read here is the WHOLE entry — the
+	// password on line one and whatever the user keeps under it, which is legitimately recovery
+	// codes or an otpauth blob — and ReplacePassword writes that trailer back. Sizing the buffer
+	// for the password alone made the rewrite drop everything past 4 KB, silently, from the one
+	// file whose contents nobody can reconstruct.
+	sec, err := sys.NewSecret(64 * 1024)
 	if err != nil {
 		_ = pr.Close()
 		_ = cmd.Wait()
@@ -505,53 +459,14 @@ func decrypt(name string) (*sys.Secret, error) {
 		sec.Close()
 		return nil, rerr
 	}
+	// A truncated read must never reach a caller that writes the value back: it would re-encrypt
+	// the entry with its tail missing and report success.
+	if sec.Overflowed() {
+		sec.Close()
+		return nil, fmt.Errorf("the entry %q is larger than this program will decrypt (64 KB); "+
+			"it was left untouched", name)
+	}
 	return sec, nil
-}
-
-// Fields returns an entry's metadata — and deliberately not its password.
-//
-// The whole record has to be decrypted to read any of it, so the first line necessarily passes
-// through this process; it is dropped here and never returned, so no caller can render it by
-// accident. Nothing above needs the password: copying goes through CopyCmd, which never comes back
-// here at all.
-func Fields(name string) (map[string]string, error) {
-	if err := ValidName(name); err != nil {
-		return nil, err
-	}
-	sec, err := decrypt(name)
-	if err != nil {
-		return nil, err
-	}
-	defer sec.Close()
-
-	// The password line is ERASED in the locked buffer before anything is read out of it. What
-	// remains is metadata — a URL, a username, a note — which is not a secret and may be parsed
-	// as an ordinary string. The distinction is the whole reason this function is allowed to
-	// return a map at all.
-	sec.DropThrough('\n')
-
-	out := map[string]string{}
-	sec.Use(func(rest string) {
-		for _, l := range strings.Split(rest, "\n") {
-			k, v, ok := strings.Cut(l, ":")
-			if !ok {
-				continue
-			}
-			k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-			if k != "" && v != "" {
-				out[k] = v
-			}
-		}
-	})
-	return out, nil
-}
-
-// SuggestName proposes a store path for a secret belonging to a key or host, following the
-// convention most stores already use: a directory per kind, then the thing itself.
-func SuggestName(kind, subject string) string {
-	subject = strings.TrimSuffix(subject, ".pub")
-	subject = strings.ReplaceAll(subject, " ", "-")
-	return path.Join(kind, subject)
 }
 
 // firstLine reduces a tool's complaint to the part worth showing on a one-line status bar.

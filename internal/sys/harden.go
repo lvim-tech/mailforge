@@ -23,6 +23,7 @@ import (
 // was never attempted — it leaves you believing in a protection you do not have.
 func Harden() []string {
 	var done []string
+	defer func() { hardened = done }()
 
 	// A zero core limit is honoured by the kernel before any handler runs, so it also defeats
 	// systemd-coredump: there is nothing to hand over.
@@ -38,6 +39,19 @@ func Harden() []string {
 
 	return done
 }
+
+// HardenSteps is how many protections Harden attempts. A caller comparing it against the length of
+// the report can tell a partial result from a complete one without matching on the wording.
+const HardenSteps = 2
+
+// hardened remembers what the startup call managed, so the doctor can report it instead of
+// re-applying the settings to find out. Written once, before the interface starts.
+var hardened []string
+
+// Hardening is what Harden managed at startup, or nil if it was never called. The report exists
+// because a hardening step that fails silently is worse than one never attempted: it leaves the
+// password field claiming a protection this process does not have.
+func Hardening() []string { return hardened }
 
 // SwapWarning reports active swap, which is the other path from memory to disk. Nothing here can
 // prevent a page from being written to an unencrypted swap device; the honest response is to say so
@@ -64,6 +78,11 @@ type Secret struct {
 	buf    []byte
 	n      int
 	locked bool
+	// over records that Append had to drop bytes for want of room. Dropping them silently is
+	// tolerable for a typed password — the field simply stops growing — and it is data loss when
+	// the buffer holds a `pass` entry that is about to be written back. The buffer cannot know
+	// which case it is in, so it keeps the fact and lets the caller decide.
+	over bool
 }
 
 // NewSecret allocates a locked buffer of the given capacity.
@@ -93,18 +112,43 @@ func NewSecret(size int) (*Secret, error) {
 // Locked reports whether the buffer is actually pinned in RAM.
 func (s *Secret) Locked() bool { return s != nil && s.locked }
 
-// Append adds bytes, silently ignoring anything past the capacity.
+// Append adds bytes, dropping anything past the capacity and recording that it did.
 func (s *Secret) Append(b []byte) {
 	if s == nil {
 		return
 	}
 	for _, c := range b {
 		if s.n >= len(s.buf) {
+			s.over = true
 			return
 		}
 		s.buf[s.n] = c
 		s.n++
 	}
+}
+
+// Overflowed reports whether anything handed to Append did not fit. It stays true until Reset,
+// because the caller that has to know — one about to write this value back over a stored one —
+// asks after the whole transfer, not during it.
+func (s *Secret) Overflowed() bool { return s != nil && s.over }
+
+// Snapshot copies the value into a second locked buffer.
+//
+// The reason is the goroutine boundary. Handing the live buffer to a background check leaves the
+// password field still writing to it: the bytes on the wire are then a mix of what was typed before
+// and after, which is a data race and a login attempt the user never made. The copy stays in locked
+// memory the whole way — nothing becomes a Go string — and the caller closes it when the goroutine
+// is done.
+func (s *Secret) Snapshot() (*Secret, error) {
+	if s == nil {
+		return nil, nil
+	}
+	c, err := NewSecret(len(s.buf))
+	if err != nil {
+		return nil, err
+	}
+	c.Append(s.buf[:s.n])
+	return c, nil
 }
 
 // Backspace removes the last byte, respecting UTF-8 continuation bytes so deleting one Cyrillic
@@ -157,7 +201,7 @@ func (s *Secret) Reset() {
 	for i := range s.buf[:s.n] {
 		s.buf[i] = 0
 	}
-	s.n = 0
+	s.n, s.over = 0, false
 }
 
 // Use hands the value to fn as a string for the moment it is needed.
@@ -298,5 +342,5 @@ func (s *Secret) Close() {
 		_ = unix.Munlock(s.buf)
 	}
 	_ = unix.Munmap(s.buf)
-	s.buf, s.n, s.locked = nil, 0, false
+	s.buf, s.n, s.locked, s.over = nil, 0, false, false
 }

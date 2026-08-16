@@ -1,5 +1,5 @@
-// Package sys is the only place in keyforge that shells out. Everything the tool does is a layer
-// over ssh-keygen / gpg / openssl / mkcert, so the whole process-spawning surface is deliberately
+// Package sys is the only place in mailforge that shells out. Everything the tool does is a layer
+// over pass / gpg / mbsync / neomutt, so the whole process-spawning surface is deliberately
 // concentrated here: one place to audit, one place that decides what may touch a terminal.
 //
 // The distinction that matters for a tool holding keys:
@@ -9,14 +9,12 @@
 //     could prompt for a secret, because a captured prompt is an invisible hang.
 //   - Interactive hands the REAL terminal over to the child. Passphrases go through this and
 //     only this: the secret is typed straight into ssh-keygen's own prompt, so it never enters
-//     keyforge's memory, never reaches a command line, and never shows up in `ps`.
+//     mailforge's memory, never reaches a command line, and never shows up in `ps`.
 package sys
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -57,25 +55,6 @@ func Run(name string, args ...string) (Result, error) {
 	return res, nil
 }
 
-// RunIn is Run with a working directory.
-func RunIn(dir, name string, args ...string) (Result, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = &out, &errb, nil
-	err := cmd.Run()
-	res := Result{Stdout: strings.TrimRight(out.String(), "\n"), Stderr: strings.TrimRight(errb.String(), "\n")}
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			res.Code = ee.ExitCode()
-			return res, nil
-		}
-		return res, err
-	}
-	return res, nil
-}
-
 // Interactive builds a command wired to the real terminal. The caller is expected to hand it to
 // tea.ExecProcess, which suspends the TUI, restores cooked mode and lets the child own the screen.
 //
@@ -89,7 +68,7 @@ func Interactive(name string, args ...string) *exec.Cmd {
 	// falls back to whatever terminal it inherited when it was STARTED, which is a different one
 	// as often as not — pinentry then either fails outright ("Inappropriate ioctl for device") or,
 	// worse, draws its dialog on somebody else's screen and leaves mouse tracking switched on there.
-	// The passphrase prompt has to appear on the terminal keyforge just handed over, and this is the
+	// The passphrase prompt has to appear on the terminal mailforge just handed over, and this is the
 	// documented way to say so.
 	if t := TTYName(); t != "" {
 		cmd.Env = append(cmd.Env, "GPG_TTY="+t)
@@ -123,60 +102,4 @@ func Which(name string) string {
 		return ""
 	}
 	return p
-}
-
-// Clipboard copies text using whichever helper this session has. Wayland first (wl-copy), then X11
-// (xclip), then the OSC 52 escape as a last resort — that one works over SSH and inside tmux, where
-// neither helper exists.
-func Clipboard(text string) error {
-	if Have("wl-copy") {
-		cmd := exec.Command("wl-copy")
-		cmd.Stdin = strings.NewReader(text)
-		return cmd.Run()
-	}
-	if Have("xclip") {
-		cmd := exec.Command("xclip", "-selection", "clipboard")
-		cmd.Stdin = strings.NewReader(text)
-		return cmd.Run()
-	}
-	// OSC 52, the fallback this function's comment has always promised and never had. It asks
-	// the TERMINAL to hold the text, which is the only mechanism that works over SSH and inside
-	// tmux, where neither helper exists. Written to /dev/tty rather than stdout: stdout may be
-	// a pipe, and a control sequence in a pipe is corruption rather than a copy.
-	//
-	// The terminal may refuse — kitty wants clipboard_control, and some multiplexers pass it on
-	// only when configured — and there is no reply to read, so this reports success on having
-	// sent it. That is honest about what it knows: the alternative is claiming failure on every
-	// terminal that quietly complies.
-	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-		defer func() { _ = tty.Close() }()
-		payload := base64.StdEncoding.EncodeToString([]byte(text))
-		if _, err := fmt.Fprintf(tty, "\x1b]52;c;%s\a", payload); err == nil {
-			return nil
-		}
-	}
-	return errors.New("no clipboard helper (wl-copy / xclip) and the terminal would not take it")
-}
-
-// ClearClipboard empties whatever Clipboard filled.
-//
-// The Passwords tab copies through `pass show --clip`, which wipes itself after 45 seconds, and
-// the interface says so. The Generator copied through the helper above and left the value there
-// for ever — in the clipboard and in every clipboard manager's history — on the one tab whose
-// values are brand-new master-passphrase candidates.
-func ClearClipboard() {
-	if Have("wl-copy") {
-		_ = exec.Command("wl-copy", "--clear").Run()
-		return
-	}
-	if Have("xclip") {
-		cmd := exec.Command("xclip", "-selection", "clipboard")
-		cmd.Stdin = strings.NewReader("")
-		_ = cmd.Run()
-		return
-	}
-	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-		defer func() { _ = tty.Close() }()
-		_, _ = fmt.Fprint(tty, "\x1b]52;c;!\a")
-	}
 }
