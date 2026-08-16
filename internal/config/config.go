@@ -301,5 +301,16 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.Chmod(tmp, mode); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// The rename lives in the DIRECTORY, and syncing the file does not sync the entry that names
+	// it. Without this the bytes are on the disk under a name that is not, so an apply that
+	// writes several files can come back after a power loss as a mixture of old and new — which
+	// is the one outcome the atomic write exists to prevent.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }

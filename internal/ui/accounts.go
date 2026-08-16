@@ -177,6 +177,9 @@ func (v *accountsView) Update(msg tea.Msg) (view, tea.Cmd) {
 		}
 		return v, nil
 
+	case reverified:
+		return v, v.recordVerified(msg)
+
 	case applied:
 		v.busy = ""
 		v.plan = setup.Plan(msg)
@@ -273,17 +276,62 @@ func (v *accountsView) keyList(msg tea.KeyMsg) (view, tea.Cmd) {
 
 // reverify checks an existing account without changing anything, reading its password back out of
 // pass into locked memory for the attempt.
+//
+// Its result is its OWN message type. Sharing `verified` with the wizard meant a check started from
+// the list ended in the wizard's folder step, applied to whatever draft happened to be left in the
+// view — a different account's, or the zero one.
 func (v *accountsView) reverify(a account.Account) tea.Cmd {
 	v.busy = "checking " + a.Address
 	cfg := v.cfg
 	return func() tea.Msg {
 		sec, err := passwordOf(cfg, a)
 		if err != nil {
-			return verified{imap: verify.Result{Detail: err.Error()}, smtp: verify.Result{Detail: err.Error()}}
+			return reverified{
+				address: a.Address,
+				imap:    verifyFail(err.Error()),
+				smtp:    verifyFail(err.Error()),
+			}
 		}
 		defer sec.Close()
-		return runChecks(cfg, a, sec)
+		res := runChecks(cfg, a, sec)
+		return reverified{address: a.Address, imap: res.imap, smtp: res.smtp}
 	}
+}
+
+// recordVerified saves what a re-check proved. The saving is the point: without it the doctor goes
+// on reporting the account as verified long ago however often the user re-checks it.
+func (v *accountsView) recordVerified(msg reverified) tea.Cmd {
+	v.busy = ""
+	if !msg.imap.OK || !msg.smtp.OK {
+		which, detail := "IMAP", msg.imap.Detail
+		if msg.imap.OK {
+			which, detail = "SMTP", msg.smtp.Detail
+		}
+		return failure("%s: %s failed at %s — %s", msg.address, which,
+			pickStage(msg.imap, msg.smtp), detail)
+	}
+	for i := range v.reg.Accounts {
+		if v.reg.Accounts[i].Address != msg.address {
+			continue
+		}
+		v.reg.Accounts[i].Verified = time.Now()
+		if msg.imap.Folders.Any() {
+			v.reg.Accounts[i].Folders = msg.imap.Folders
+		}
+		if err := v.reg.Save(); err != nil {
+			return failure("%v", err)
+		}
+		return status("%s verified ok", msg.address)
+	}
+	// The account was removed while the check was in flight; there is nothing to record.
+	return status("%s verified ok, but it is no longer in the registry", msg.address)
+}
+
+func pickStage(imap, smtp verify.Result) verify.Stage {
+	if !imap.OK {
+		return imap.Reached
+	}
+	return smtp.Reached
 }
 
 func (v *accountsView) keyDelete(msg tea.KeyMsg) (view, tea.Cmd) {
@@ -306,7 +354,7 @@ func (v *accountsView) keyDelete(msg tea.KeyMsg) (view, tea.Cmd) {
 			v.delMail = !v.delMail
 		}
 	case "enter", "y":
-		cfg, reg := v.cfg, v.reg
+		cfg, reg := v.cfg, v.reg.Clone()
 		pass, mail := v.delPass, v.delMail
 		v.busy = "removing " + a.Address
 		v.mode = mApply
@@ -320,7 +368,7 @@ func (v *accountsView) keyDelete(msg tea.KeyMsg) (view, tea.Cmd) {
 // applyIndexOnly re-renders what depends on the whole registry after a reorder or a default
 // change: the per-account files are untouched, but every one of their sidebar positions moved.
 func (v *accountsView) applyIndexOnly() tea.Cmd {
-	cfg, reg := v.cfg, v.reg
+	cfg, reg := v.cfg, v.reg.Clone()
 	return func() tea.Msg {
 		var p setup.Plan
 		setup.ApplyIndex(cfg, &reg, &p)
@@ -378,6 +426,15 @@ type discovered provider.Guess
 type verified struct {
 	imap verify.Result
 	smtp verify.Result
+}
+
+// reverified is the same outcome reached from the LIST, where it means "record this", not "go on
+// to the next wizard step". It carries the address because by the time it arrives the selection may
+// have moved to another account.
+type reverified struct {
+	address string
+	imap    verify.Result
+	smtp    verify.Result
 }
 
 type applied setup.Plan

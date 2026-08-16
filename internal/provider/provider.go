@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -269,7 +270,10 @@ func fromISPDB(ctx context.Context, domain, address string) (Guess, bool) {
 	}
 
 	var cfg ispdbConfig
-	if err := xml.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+	// Bounded: this is the one input to the program that comes off the network from somebody
+	// else's server, and an unbounded decoder turns a slow answer into an unbounded allocation.
+	// A provider record that does not fit in a megabyte is not a provider record.
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cfg); err != nil {
 		return Guess{}, false
 	}
 

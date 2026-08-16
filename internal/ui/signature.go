@@ -99,7 +99,7 @@ func (v *accountsView) applySignature(msg signatureEdited) tea.Cmd {
 	// built not to do.
 	v.mode = mApply
 	v.busy = "writing the signature"
-	cfg, reg := v.cfg, v.reg
+	cfg, reg := v.cfg, v.reg.Clone()
 	return func() tea.Msg {
 		// No secret: ApplyAccount leaves the stored password alone unless one is handed to it.
 		return applied(setup.ApplyAccount(cfg, &reg, a, nil))

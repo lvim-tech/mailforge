@@ -24,7 +24,9 @@ type secretInput struct {
 
 func newSecretInput(label, hint string) *secretInput {
 	s := &secretInput{label: label, hint: hint}
-	buf, err := sys.NewSecret(512)
+	// 4 KB, matching what the store will decrypt: a generated token pasted in here should not be
+	// halved by the field it is typed into.
+	buf, err := sys.NewSecret(4096)
 	if err != nil {
 		s.err = err.Error()
 		return s
@@ -118,6 +120,11 @@ func (s *secretInput) render(focused bool) string {
 		dots += stRowSel.Render(" ")
 	}
 	body := stFg.Render(dots)
+	// A field that stopped accepting input has to say so. Silently keeping the first N bytes
+	// stores a password the user never typed and only finds out about at the next login.
+	if s.buf.Overflowed() {
+		body += stErr.Render("  the field is full; what follows was not taken")
+	}
 	lock := ""
 	if s.buf.Locked() {
 		lock = stDim.Render("   locked memory")

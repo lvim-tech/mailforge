@@ -388,7 +388,11 @@ func backup(path string) error {
 		return err
 	}
 	base := filepath.Base(path)
-	name := fmt.Sprintf("%s.%s", base, time.Now().UTC().Format("20060102T150405Z"))
+	// Nanoseconds, not seconds. An apply touches the same foreign file more than once inside one
+	// second — Fix loops every account — and a second-granular name made the second write
+	// overwrite the backup taken by the first. The copy that is then lost is the only one that
+	// mattered: the user's own pre-apply file.
+	name := fmt.Sprintf("%s.%s", base, time.Now().UTC().Format("20060102T150405.000000000Z"))
 	if err := config.WriteAtomic(filepath.Join(dir, name), b, 0o600); err != nil {
 		return err
 	}

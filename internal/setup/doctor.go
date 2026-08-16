@@ -9,7 +9,6 @@ package setup
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/lvim-tech/mailforge/internal/config"
@@ -180,6 +179,33 @@ func Environment(c config.Config) Report {
 		r.Findings = append(r.Findings, Finding{OK, "mbsyncrc", c.MbsyncRC, ""})
 	}
 
+	// Memory hardening, REPORTED rather than assumed. Harden runs before anything can hold a
+	// password and returns what it managed; leaving that report unread is the silent
+	// non-protection it exists to prevent, while the password field goes on saying "locked
+	// memory" beside every character typed.
+	if done := sys.Hardening(); len(done) < sys.HardenSteps {
+		got := "nothing"
+		if len(done) > 0 {
+			got = strings.Join(done, ", ")
+		}
+		r.Findings = append(r.Findings, Finding{
+			Warn, "memory hardening",
+			"the kernel accepted " + got + " — a crash or a debugger could still read a password out of this process",
+			"check the limits this user runs under (ulimit -c, /proc/sys/kernel/yama)",
+		})
+	} else {
+		r.Findings = append(r.Findings, Finding{OK, "memory hardening", strings.Join(done, ", "), ""})
+	}
+
+	// Swap is the other path from memory to disk, and nothing in this program can close it. Say
+	// so rather than imply a guarantee that stops at the swap device.
+	if w := sys.SwapWarning(); w != "" {
+		r.Findings = append(r.Findings, Finding{
+			Warn, "swap", w,
+			"encrypt the swap device, or accept that a password may reach it",
+		})
+	}
+
 	// Config file: its absence is what triggers first-run, so it is worth stating plainly
 	// rather than leaving the reader to infer it from a screen they have not seen yet.
 	if !config.Exists() {
@@ -193,12 +219,6 @@ func Environment(c config.Config) Report {
 	}
 
 	return r
-}
-
-// PassEntry is where an account's password lives. One place computes it, so the doctor and the
-// writer can never disagree about which entry an account owns.
-func PassEntry(c config.Config, address string) string {
-	return filepath.ToSlash(filepath.Join(c.PassPrefix, address))
 }
 
 // versionLine picks the line that actually carries the version out of what a tool prints.
@@ -216,12 +236,4 @@ func versionLine(out string) string {
 		return strings.TrimSpace(l)
 	}
 	return ""
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
 }

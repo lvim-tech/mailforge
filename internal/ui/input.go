@@ -10,7 +10,7 @@ import (
 // input is a one-line text field.
 //
 // Hand-rolled rather than pulled from a widget library for one reason that matters in this program:
-// keyforge must never end up with a secret in a component whose lifetime it does not control. This
+// mailforge must never end up with a secret in a component whose lifetime it does not control. This
 // field is used only for names, comments and hostnames — never for a passphrase, which goes
 // straight into ssh-keygen's own prompt — and keeping it small makes that boundary easy to see.
 type input struct {

@@ -309,20 +309,40 @@ func (v *accountsView) verifyStep(useStored bool) tea.Cmd {
 			return runChecks(cfg, draft, sec)
 		}
 	}
-	sec := v.pass.secret()
-	return func() tea.Msg { return runChecks(cfg, draft, sec) }
+	// A SNAPSHOT, not the live buffer. Esc leaves this screen while the check is still running,
+	// and the next keystroke in the password field would otherwise edit the bytes the goroutine
+	// is streaming into the socket.
+	sec, err := v.pass.secret().Snapshot()
+	if err != nil {
+		msg := "the password could not be prepared: " + err.Error()
+		return func() tea.Msg { return verified{imap: verifyFail(msg), smtp: verifyFail(msg)} }
+	}
+	return func() tea.Msg {
+		defer sec.Close()
+		return runChecks(cfg, draft, sec)
+	}
 }
 
 // applyStep writes everything, in the order that survives an interruption.
 func (v *accountsView) applyStep() tea.Cmd {
 	v.mode = mApply
 	v.busy = "writing"
-	cfg, reg, draft := v.cfg, v.reg, v.draft
+	// Clone, not assign: the apply runs in another goroutine and sorts and rewrites the accounts
+	// while this one is still drawing them.
+	cfg, reg, draft := v.cfg, v.reg.Clone(), v.draft
 	var sec *sys.Secret
 	if !v.pass.empty() {
-		sec = v.pass.secret()
+		// Snapshot for the same reason verifyStep does: the write happens off this goroutine.
+		s, err := v.pass.secret().Snapshot()
+		if err != nil {
+			return failure("the password could not be prepared: %v", err)
+		}
+		sec = s
 	}
 	return func() tea.Msg {
+		if sec != nil {
+			defer sec.Close()
+		}
 		return applied(setup.ApplyAccount(cfg, &reg, draft, sec))
 	}
 }

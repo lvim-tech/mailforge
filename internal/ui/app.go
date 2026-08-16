@@ -114,6 +114,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// The RESULT of something the accounts tab started belongs to the accounts tab, whichever one
+	// is on screen when it lands. The wizard pins the tab while it runs, but a re-verify or an
+	// index re-render started from the list does not, so tabbing away while one was in flight
+	// delivered its answer to the Doctor, which dropped it — leaving "checking …" over a list that
+	// had long finished, and any error it reported never shown at all.
+	if i, ok := m.owner(msg); ok {
+		nv, cmd := m.views[i].Update(msg)
+		m.views[i] = nv
+		return m, cmd
+	}
+
 	before := screenOf(m.views[m.active])
 	nv, cmd := m.views[m.active].Update(msg)
 	m.views[m.active] = nv
@@ -126,6 +137,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status, m.stErr = "", false
 	}
 	return m, cmd
+}
+
+// owner names the view a message belongs to when that is not simply the visible one.
+//
+// Only the outcomes of work the accounts tab starts are listed. Everything else — a key, a resize,
+// a reload — is about whatever is on screen, and routing it anywhere else would be wrong.
+func (m Model) owner(msg tea.Msg) (int, bool) {
+	switch msg.(type) {
+	case accountsLoaded, discovered, verified, reverified, applied, signatureEdited:
+	default:
+		return 0, false
+	}
+	for i, v := range m.views {
+		if _, ok := v.(*accountsView); !ok {
+			continue
+		}
+		if i == m.active {
+			// Already the active view: let the ordinary path handle it, so a screen change
+			// still clears a status line that has stopped being true.
+			return 0, false
+		}
+		return i, true
+	}
+	return 0, false
 }
 
 // screener is implemented by a view whose screen can change without the tab changing — a wizard.
