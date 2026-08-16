@@ -74,6 +74,7 @@ func IMAP(srv account.Server, address string, secret *sys.Secret, timeout time.D
 	// The greeting proves something is speaking IMAP, which a TCP accept on shared hosting
 	// does not: a wildcard vhost will accept a connection to anything.
 	res.Reached = StageGreet
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	line, err := r.ReadString('\n')
 	if err != nil {
 		res.Detail = "no greeting: " + err.Error()
@@ -84,6 +85,26 @@ func IMAP(srv account.Server, address string, secret *sys.Secret, timeout time.D
 		return res
 	}
 	res.Capabil = strings.TrimSpace(line)
+
+	// STARTTLS when the account says so. SMTP has always done this; IMAP did not, and the
+	// consequence was the LOGIN — password bytes included — written to a bare socket for every
+	// account on port 143. A server that will not upgrade is one this program will not
+	// authenticate to.
+	if srv.Security == account.STARTTLS {
+		res.Reached = StageTLS
+		if err := imapStartTLS(conn, r, timeout); err != nil {
+			res.Detail = err.Error()
+			return res
+		}
+		tc := tls.Client(conn, &tls.Config{ServerName: srv.Host})
+		if err := tc.Handshake(); err != nil {
+			res.Detail = err.Error()
+			return res
+		}
+		// A new reader: anything the old one buffered belongs to the plaintext phase and must
+		// not be read as if the server had said it under TLS.
+		conn, r = tc, bufio.NewReader(tc)
+	}
 
 	res.Reached = StageAuth
 	if err := imapLogin(conn, r, srv.User(address), secret, timeout); err != nil {
@@ -134,8 +155,34 @@ func dial(srv account.Server, timeout time.Duration, res *Result) (net.Conn, *bu
 	r := bufio.NewReader(c)
 	// The caller reads the greeting; for STARTTLS the upgrade has to happen after it, so this
 	// path is completed by the protocol-specific code. Returning the plain connection keeps
-	// the two protocols' STARTTLS dances where they belong.
+	// the two protocols' STARTTLS dances where they belong — both of them do it, and both
+	// refuse to authenticate if it did not happen.
 	return c, r, nil
+}
+
+// imapStartTLS asks for the upgrade and accepts nothing but a tagged OK.
+//
+// Untagged lines may precede the tagged reply, so the tag is what is matched, not the first line.
+func imapStartTLS(conn net.Conn, r *bufio.Reader, timeout time.Duration) error {
+	if err := writeLine(conn, "a0 STARTTLS", timeout); err != nil {
+		return err
+	}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("no reply to STARTTLS: %w", err)
+		}
+		l := strings.TrimSpace(line)
+		if !strings.HasPrefix(l, "a0 ") {
+			continue
+		}
+		if !strings.HasPrefix(l, "a0 OK") {
+			return fmt.Errorf("the server does not offer STARTTLS, so the password would cross "+
+				"in the clear: %s", truncate(l, 120))
+		}
+		return nil
+	}
 }
 
 // classify turns a dial error into the stage that explains it, so the message can say "the host
@@ -178,9 +225,15 @@ func imapLogin(conn net.Conn, r *bufio.Reader, user string, secret *sys.Secret, 
 	if n == 0 {
 		return fmt.Errorf("no password was entered")
 	}
+	// The invariant, not a second opinion: whatever the caller believed it negotiated, the
+	// password is written to a TLS connection or it is not written at all.
+	if _, ok := conn.(*tls.Conn); !ok {
+		return fmt.Errorf("refusing to send the password over an unencrypted connection")
+	}
 	if err := writeLine(conn, fmt.Sprintf("a1 LOGIN %s {%d}", quoteIMAP(user), n), timeout); err != nil {
 		return err
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	line, err := r.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("no continuation: %w", err)
@@ -375,7 +428,18 @@ func writeLine(conn net.Conn, s string, timeout time.Duration) error {
 	return err
 }
 
+// quoteIMAP renders a user name as an IMAP quoted string.
+//
+// Control characters are dropped before quoting, not escaped: a quoted string cannot contain CR or
+// LF at all, and a user name carrying them — an autoconfig answer is not this program's own data —
+// would otherwise end the LOGIN line and inject a command into this very session.
 func quoteIMAP(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
 }
