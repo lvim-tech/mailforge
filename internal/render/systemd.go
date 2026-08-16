@@ -36,6 +36,10 @@ func SystemdUserDir() string {
 // The binary is named by ABSOLUTE PATH: a user unit starts with a PATH systemd assembled, not the
 // one a login shell exports, and "mbsync" resolving under a terminal says nothing about whether it
 // resolves here. The same reasoning that took $EDITOR out of the NeoMutt config.
+//
+// And the path is QUOTED, because systemd splits ExecStart on whitespace: a binary living under a
+// directory with a space in its name produced a unit that failed at start with an error naming
+// neither the space nor the path, and a timer that then never fetched anything.
 func MbsyncService(c config.Config) string {
 	// mailforge's own path, resolved the same way anything else on this machine would resolve
 	// it. The unit runs `mailforge fetch`, not mbsync, so the fetch and the notification that
@@ -58,7 +62,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=` + bin + ` fetch
+ExecStart="` + bin + `" fetch
 # The password comes from pass, which needs the gpg agent to answer WITHOUT a prompt: there is
 # no terminal here to type a passphrase into. An agent that has forgotten the key makes this
 # unit fail rather than hang, which is the honest of the two.

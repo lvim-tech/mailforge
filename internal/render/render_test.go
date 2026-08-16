@@ -62,7 +62,8 @@ func TestAccountRCHosted(t *testing.T) {
 		`set postponed              = "+Drafts"`,
 		`set trash                  = "+Trash"`,
 		`set smtp_url               = "smtps://hello%40example.com@credo.superhosting.bg:465/"`,
-		"pass show mail/hello@example.com | head -1",
+		// Single-quoted: the entry is built from user input and lands in a shell command line.
+		"pass show 'mail/hello@example.com' | head -1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing line:\n  %s\n--- rendered ---\n%s", want, got)
@@ -113,7 +114,7 @@ func TestMbsyncBlockUsesTheCurrentKeyword(t *testing.T) {
 		"Host siera.superhosting.bg",
 		"Port 993",
 		"User hello@example.com",
-		`PassCmd "pass show mail/hello@example.com | head -1"`,
+		`PassCmd "pass show 'mail/hello@example.com' | head -1"`,
 		"CertificateFile /etc/ssl/ca-bundle.pem",
 		"MaildirStore hello@example.com-local",
 		"Path /home/u/.local/share/mail/hello@example.com/",
@@ -161,7 +162,7 @@ func TestAccountsRCOrdersAndSourcesTheDefaultLast(t *testing.T) {
 	if iHosted > iGmail {
 		t.Errorf("Order was not honoured — the list must not depend on the slice order")
 	}
-	if !strings.Contains(got, "folder-hook hello@example.com/* source /home/u/.config/neomutt/mailforge/accounts/hello@example.com.rc") {
+	if !strings.Contains(got, `folder-hook "hello@example.com/*" source /home/u/.config/neomutt/mailforge/accounts/hello@example.com.rc`) {
 		t.Errorf("folder-hook missing or wrong:\n%s", got)
 	}
 	// The default is sourced last, so its identity is the one in force at startup.

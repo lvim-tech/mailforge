@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/lvim-tech/mailforge/internal/config"
 )
@@ -71,6 +72,13 @@ type Folders struct {
 	Trash   string `json:"trash,omitempty"`
 	Archive string `json:"archive,omitempty"`
 	Spam    string `json:"spam,omitempty"`
+}
+
+// Any reports whether the server named any special mailbox at all. A discovery that came back
+// empty — an old server without SPECIAL-USE and without recognisable English names — must not be
+// allowed to erase names that are already recorded.
+func (f Folders) Any() bool {
+	return f.Sent != "" || f.Drafts != "" || f.Trash != "" || f.Archive != "" || f.Spam != ""
 }
 
 // Quirks are the things a provider does differently, recorded per account because they are facts
@@ -240,6 +248,16 @@ func (a Account) Validate() error {
 	if strings.ContainsAny(a.Address, "/\\") || strings.HasPrefix(a.Address, ".") {
 		return fmt.Errorf("%q cannot be used as a path element", a.Address)
 	}
+	// And it becomes part of a SHELL COMMAND LINE — `pass show <prefix>/<address>` in the
+	// generated neomuttrc and .mbsyncrc. Quoting alone would be enough for the shell, and the
+	// renderer does quote, but an address is also written into a folder-hook pattern and a
+	// systemd-adjacent path, so the honest place to stop the odd ones is here, where the answer
+	// can name the character. Everything a real mailbox needs is allowed.
+	for _, r := range a.Address {
+		if badAddressRune(r) {
+			return fmt.Errorf("%q contains a character an address cannot have: %q", a.Address, string(r))
+		}
+	}
 	for _, s := range []struct {
 		what string
 		srv  Server
@@ -257,9 +275,35 @@ func (a Account) Validate() error {
 	return nil
 }
 
+// badAddressRune names the characters an address must not carry: control characters, whitespace,
+// and the shell and regex metacharacters that would change the meaning of a generated command line
+// or of a folder-hook pattern. Letters and digits of any script pass, so an internationalised
+// mailbox is still accepted; what is refused is the punctuation no real mailbox uses and every
+// injection does.
+func badAddressRune(r rune) bool {
+	if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+		return true
+	}
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	return !strings.ContainsRune(".@_+-=~", r)
+}
+
 // Registry is the account list as stored.
 type Registry struct {
 	Accounts []Account `json:"accounts"`
+}
+
+// Clone returns a registry that shares nothing with this one.
+//
+// Copying a Registry by assignment copies the SLICE HEADER, not the accounts: both copies keep
+// pointing at one backing array, so Upsert, Remove and the in-place sort in normalise write into
+// memory the other copy is reading. The interface hands a registry to a background apply and goes
+// on drawing the list from its own, which is exactly that race — a deep copy at the hand-off is
+// what keeps the two apart.
+func (r Registry) Clone() Registry {
+	return Registry{Accounts: append([]Account(nil), r.Accounts...)}
 }
 
 // RegistryPath sits next to config.json: accounts.json is configuration too, and a user may

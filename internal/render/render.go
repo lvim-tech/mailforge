@@ -86,7 +86,7 @@ func AccountRC(c config.Config, a account.Account) string {
 
 	b.WriteString("\n")
 	set("smtp_url", quote(a.SMTPURL()))
-	set("smtp_pass", "\"`pass show "+a.PassEntry(c)+" | head -1`\"")
+	set("smtp_pass", "\"`pass show "+shellQuote(a.PassEntry(c))+" | head -1`\"")
 	// head -1: a pass entry may carry metadata under the password, and NeoMutt would take the
 	// whole output as the passphrase. One line is the password by pass's own convention.
 	set("smtp_authenticators", quote("plain:login"))
@@ -114,7 +114,9 @@ func AccountsRC(c config.Config, accounts []account.Account) string {
 		if boxes := mailboxLine(c, a); boxes != "" {
 			b.WriteString(boxes + "\n")
 		}
-		fmt.Fprintf(&b, "folder-hook %s/* source %s\n", a.Address, a.RCFile(c))
+		// The pattern is quoted: unquoted, an address containing a space would be read as a
+		// pattern and a command rather than as one pattern.
+		fmt.Fprintf(&b, "folder-hook %s source %s\n", quote(a.Address+"/*"), a.RCFile(c))
 	}
 
 	// Sourced last so its identity is the one in force at startup. A folder-hook fires on the
@@ -173,7 +175,7 @@ func MbsyncBlock(c config.Config, a account.Account) string {
 	fmt.Fprintf(&b, "Host %s\n", a.IMAP.Host)
 	fmt.Fprintf(&b, "Port %d\n", a.IMAP.Port)
 	fmt.Fprintf(&b, "User %s\n", a.IMAP.User(a.Address))
-	fmt.Fprintf(&b, "PassCmd \"pass show %s | head -1\"\n", a.PassEntry(c))
+	fmt.Fprintf(&b, "PassCmd \"pass show %s | head -1\"\n", shellQuote(a.PassEntry(c)))
 	fmt.Fprintf(&b, "TLSType %s\n", tlsType(a.IMAP.Security))
 	fmt.Fprintf(&b, "CertificateFile %s\n", c.CertFile)
 	b.WriteString("\n")
@@ -250,7 +252,20 @@ func NeomuttKeysInclude(c config.Config) string {
 // A display name with a quote in it is rare and a path with one is rarer, but the failure when it
 // happens is a config file that stops parsing halfway with an error naming a line the user never
 // wrote.
+//
+// BACKTICKS ARE ESCAPED TOO, and that one is not cosmetic: NeoMutt runs backticked text through the
+// shell inside a double-quoted value — this very file depends on it for smtp_pass — so an
+// unescaped backtick in a real name is a command that runs on every NeoMutt start. Newlines are
+// replaced rather than escaped, because a value that spans lines ends the string whatever is done
+// to it, and the rest of the line would be read as configuration.
 func quote(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "`", "\\`", "\n", " ", "\r", " ")
 	return `"` + r.Replace(s) + `"`
+}
+
+// shellQuote wraps a value for /bin/sh, which is what NeoMutt's backticks and mbsync's PassCmd hand
+// their command lines to. The pass entry is built from the address and the configured prefix, and
+// neither is this program's own text.
+func shellQuote(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
 }
