@@ -179,6 +179,22 @@ func clampLines(s string, n int) string {
 	return strings.Join(lines[:n], "\n")
 }
 
+// padLines stretches a rendered block to exactly n lines, so whatever follows it starts at a
+// fixed row rather than wherever the content happened to stop. The counterpart of clampLines:
+// one cuts, the other fills, and between them the body is always the height it was budgeted —
+// which is what keeps the footer on the bottom edge of the terminal instead of floating up
+// under a short list.
+func padLines(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	have := strings.Count(s, "\n") + 1
+	if have >= n {
+		return s
+	}
+	return s + strings.Repeat("\n", n-have)
+}
+
 // window returns the half-open range of rows to draw so that `sel` stays on screen.
 //
 // The cursor is kept inside the visible band rather than centred: a list that recentres on every

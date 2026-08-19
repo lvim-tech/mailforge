@@ -237,7 +237,12 @@ func (m Model) View() string {
 	if bodyH < 0 {
 		bodyH = 0
 	}
-	body := clampLines(m.views[m.active].Render(m.w, bodyH), bodyH)
+	// Cut to the budget AND padded to it: a body shorter than its height used to pull the status
+	// line and the key hints up under it, so they sat just below the content — near the top of
+	// the window on a short list, somewhere else on a long one. The hints belong on the bottom
+	// edge of the terminal, in the same place every time, and only the space between the tab
+	// strip and them scrolls.
+	body := padLines(clampLines(m.views[m.active].Render(m.w, bodyH), bodyH), bodyH)
 
 	// The invariant, checked at the one place it can be. A frame one row taller than the
 	// terminal makes the terminal scroll, and under the alternate screen the row lost off the
