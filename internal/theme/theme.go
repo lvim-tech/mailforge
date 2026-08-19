@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/lvim-tech/mailforge/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 // Palette is the ten roles the interface paints with.
@@ -78,13 +79,13 @@ type Result struct {
 
 // file names the palette document format mailforge reads.
 //
-// name + colors, the same shape lvim-colorscheme already generates for the other Bubble Tea tools
-// in this set (extras/clipack/*.yaml) — so a generator beside it has nothing new to invent. A flat
+// name + colors, the per-app YAML the plugin generates for each of the Bubble Tea tools in this set
+// (extras/mailforge/*.yaml) — one small document per theme, dropped next to the config. A flat
 // object of role → hex is accepted too, because that is what somebody writing one by hand produces
-// on the first try.
+// on the first try. YAML is a superset of JSON, so a document written either way is read the same.
 type file struct {
-	Name   string            `json:"name"`
-	Colors map[string]string `json:"colors"`
+	Name   string            `yaml:"name"`
+	Colors map[string]string `yaml:"colors"`
 }
 
 // Load resolves a palette, in the order a user would expect to be obeyed.
@@ -120,9 +121,10 @@ func Load(configured string) Result {
 
 // resolve turns a name or a path into a palette.
 func resolve(name string) (Result, bool) {
-	// A path is anything that looks like one: it is taken literally, so a theme can be kept
-	// anywhere and pointed at from an environment variable during a single run.
-	if strings.ContainsRune(name, os.PathSeparator) || strings.HasSuffix(name, ".json") {
+	// A path is anything that looks like one, or anything already carrying a document extension: it
+	// is taken literally, so a theme can be kept anywhere and pointed at from an environment
+	// variable during a single run.
+	if strings.ContainsRune(name, os.PathSeparator) || hasThemeExt(name) {
 		if r, ok := readFile(name); ok {
 			return r, true
 		}
@@ -131,24 +133,25 @@ func resolve(name string) (Result, bool) {
 	dir := config.ThemeDir()
 	// Both spellings of the same theme. Neovim calls it `lvim-everforest-soft` (the :colorscheme
 	// command) and every generated file calls it `LvimEverforest_soft` (the extras/ file name), and
-	// which of the two a user has in hand depends only on where they copied it from.
+	// which of the two a user has in hand depends only on where they copied it from. One per-app
+	// YAML document per theme, the shape the plugin generates into extras/mailforge/*.yaml.
 	for _, n := range []string{name, extrasName(name)} {
 		if n == "" {
 			continue
 		}
-		if r, ok := readFile(filepath.Join(dir, n+".json")); ok {
-			return r, true
-		}
-	}
-	// The swatch index the plugin ships: extras/themes.txt, one line per theme. It is the only
-	// file that carries all 48 palettes at once, which makes it the one worth copying next to
-	// the themes rather than fetching a file per theme.
-	for _, n := range []string{name, extrasName(name)} {
-		if r, ok := readSwatch(filepath.Join(dir, "themes.txt"), n); ok {
+		if r, ok := readFile(filepath.Join(dir, n+".yaml")); ok {
 			return r, true
 		}
 	}
 	return Result{}, false
+}
+
+// hasThemeExt reports whether a name already carries a palette-document extension, and so should be
+// read as a literal path rather than looked up by name.
+func hasThemeExt(name string) bool {
+	return strings.HasSuffix(name, ".yaml") ||
+		strings.HasSuffix(name, ".yml") ||
+		strings.HasSuffix(name, ".json")
 }
 
 // readFile reads one palette document. The parsing is separate so it can be tested against the
@@ -159,7 +162,7 @@ func readFile(path string) (Result, bool) {
 	if err != nil {
 		return Result{}, false
 	}
-	r, ok := parsePalette(b, strings.TrimSuffix(filepath.Base(path), ".json"))
+	r, ok := parsePalette(b, baseName(path))
 	if !ok {
 		return Result{}, false
 	}
@@ -167,17 +170,18 @@ func readFile(path string) (Result, bool) {
 	return r, true
 }
 
-// parsePalette turns a palette document into a result, or refuses it.
+// parsePalette turns a palette document into a result, or refuses it. The document is YAML, which
+// is a superset of JSON, so a palette written either way parses the same.
 func parsePalette(b []byte, fallbackName string) (Result, bool) {
 	var f file
-	if err := json.Unmarshal(b, &f); err != nil {
+	if err := yaml.Unmarshal(b, &f); err != nil {
 		return Result{}, false
 	}
 	if len(f.Colors) == 0 {
 		// The hand-written form: role → hex at the top level. Unmarshalled into the same map,
 		// so a document that is neither shape simply produces no roles and is refused below.
 		flat := map[string]string{}
-		if err := json.Unmarshal(b, &flat); err != nil {
+		if err := yaml.Unmarshal(b, &flat); err != nil {
 			return Result{}, false
 		}
 		delete(flat, "name")
@@ -335,8 +339,8 @@ func rgb(hex string) (r, g, b float64, ok bool) {
 	return float64((n >> 16) & 0xff), float64((n >> 8) & 0xff), float64(n & 0xff), true
 }
 
-// blend mixes a towards b by t (0 keeps a, 1 becomes b), for the two roles the swatch index does
-// not carry.
+// blend mixes a towards b by t (0 keeps a, 1 becomes b), the small step lift walks a foreground
+// through until it clears the readability floor.
 func blend(a, b string, t float64) string {
 	ar, ag, ab, ok := rgb(a)
 	br, bg, bb, ok2 := rgb(b)
@@ -407,49 +411,14 @@ func extrasName(name string) string {
 	return "Lvim" + strings.ToUpper(family[:1]) + family[1:] + "_" + variant
 }
 
-// readSwatch reads one line of the plugin's themes.txt index.
-//
-// The format is fixed by the generator that writes it — `name` then eleven colours, in the order
-// bg fg red orange yellow green teal cyan blue purple magenta — so this is a documented format
-// rather than a guess at one. Two of mailforge's roles are not in it: the selected-row background
-// and the dim text, which are derived from bg and fg the way the palettes themselves derive them,
-// one small step off the surface and a little under half way back to it.
-func readSwatch(path, name string) (Result, bool) {
-	if name == "" {
-		return Result{}, false
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return Result{}, false
-	}
-	r, ok := swatchLine(string(b), name)
-	if !ok {
-		return Result{}, false
-	}
-	r.Source = path
-	return r, true
-}
-
-// swatchLine finds one theme's line in a themes.txt and builds its palette.
-func swatchLine(text, name string) (Result, bool) {
-	for _, line := range strings.Split(text, "\n") {
-		f := strings.Fields(line)
-		if len(f) != 12 || !strings.EqualFold(f[0], name) {
-			continue
+// baseName is a theme file's name with its document extension stripped, the fallback name for a
+// palette whose document does not carry its own.
+func baseName(path string) string {
+	b := filepath.Base(path)
+	for _, ext := range []string{".yaml", ".yml", ".json"} {
+		if strings.HasSuffix(b, ext) {
+			return strings.TrimSuffix(b, ext)
 		}
-		colors := map[string]string{
-			"bg": f[1], "fg": f[2], "red": f[3], "orange": f[4], "yellow": f[5],
-			"green": f[6], "blue": f[9], "purple": f[10],
-		}
-		colors["bg_alt"] = blend(f[1], f[2], 0.06)
-		colors["dim"] = blend(f[2], f[1], 0.45)
-		p, missing := fill(colors)
-		p, lifted := readable(p)
-		return Result{
-			Palette: p,
-			Name:    f[0],
-			Notes:   append(append(filledNote(missing), "bg_alt and dim derived from bg and fg"), lifted...),
-		}, true
 	}
-	return Result{}, false
+	return b
 }

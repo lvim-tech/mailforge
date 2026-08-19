@@ -1,6 +1,10 @@
 package theme
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestExtrasNameMatchesThePluginsOwnSpelling: the same theme is written two ways — the
 // :colorscheme command in Neovim, the generated file name in extras/ — and mailforge has to find a
@@ -87,38 +91,59 @@ func TestUnreadableForegroundIsLifted(t *testing.T) {
 	}
 }
 
-// TestSwatchLineReadsThePluginsIndex against a real line of extras/themes.txt, whose columns are
-// fixed by the generator that writes it: name bg fg red orange yellow green teal cyan blue purple
-// magenta.
-func TestSwatchLineReadsThePluginsIndex(t *testing.T) {
-	const index = "LvimBase_dark #20272b #5e8888 #d75e52 #e19556 #d8b36f #7e965a #407e70 #448595 #447ca2 #40719a #c6614d\n" +
-		"LvimEverforest_soft #292f33 #5a6158 #cb4f4f #cc7942 #af9e6b #75783a #357b6d #527a57 #42728b #635d71 #bb755e\n"
+// TestResolveReadsThePerAppYAML: a named theme is resolved to one per-app YAML document in the
+// theme directory — the shape the plugin generates into extras/mailforge/*.yaml, all ten roles
+// present. Both the generated spelling and the :colorscheme spelling find the same file.
+func TestResolveReadsThePerAppYAML(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	themes := filepath.Join(dir, "mailforge", "themes")
+	if err := os.MkdirAll(themes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const doc = `name: LvimNord_dark
+colors:
+    bg: "#232831"
+    bg_alt: "#2c313a"
+    fg: "#b3bac6"
+    dim: "#727883"
+    red: "#ac6e74"
+    yellow: "#c3a870"
+    green: "#879978"
+    blue: "#73889e"
+    purple: "#887f93"
+    orange: "#b88473"
+`
+	if err := os.WriteFile(filepath.Join(themes, "LvimNord_dark.yaml"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	r, ok := swatchLine(index, "LvimBase_dark")
-	if !ok {
-		t.Fatal("the theme was not found in the index")
+	// The generated spelling, and the :colorscheme spelling that translates to it, both land on the
+	// same file — and the palette arrives exactly as written, since every role is supplied.
+	for _, name := range []string{"LvimNord_dark", "lvim-nord-dark"} {
+		r, ok := resolve(name)
+		if !ok {
+			t.Fatalf("resolve(%q) found no palette", name)
+		}
+		p := r.Palette
+		if p.BG != "#232831" || p.BGAlt != "#2c313a" || p.FG != "#b3bac6" || p.Dim != "#727883" ||
+			p.Red != "#ac6e74" || p.Yellow != "#c3a870" || p.Green != "#879978" ||
+			p.Blue != "#73889e" || p.Purple != "#887f93" || p.Orange != "#b88473" {
+			t.Errorf("resolve(%q) palette not read verbatim: %+v", name, p)
+		}
+		if r.Name != "LvimNord_dark" {
+			t.Errorf("resolve(%q) name = %q", name, r.Name)
+		}
 	}
-	p := r.Palette
-	if p.BG != "#20272b" || p.FG != "#5e8888" || p.Red != "#d75e52" ||
-		p.Orange != "#e19556" || p.Yellow != "#d8b36f" || p.Green != "#7e965a" ||
-		p.Blue != "#447ca2" || p.Purple != "#40719a" {
-		t.Errorf("the columns were read in the wrong order: %+v", p)
+
+	// A literal path to the file is taken as given, wherever it is kept.
+	if r, ok := resolve(filepath.Join(themes, "LvimNord_dark.yaml")); !ok || r.Palette.BG != "#232831" {
+		t.Errorf("a literal .yaml path was not read: %v %+v", ok, r.Palette)
 	}
-	// The two roles the index does not carry are derived, not left at the built-in's values.
-	if p.BGAlt == Builtin().BGAlt || p.Dim == Builtin().Dim {
-		t.Errorf("bg_alt and dim were not derived: %q %q", p.BGAlt, p.Dim)
-	}
-	// everforest_soft is the case the readability floor exists for: its editor `fg` is #5a6158 on
-	// a #292f33 background, which is 1.6:1 as plain text.
-	soft, _ := swatchLine(index, "LvimEverforest_soft")
-	if c := contrast(soft.Palette.FG, soft.Palette.BG); c < 3 {
-		t.Errorf("everforest_soft's foreground reads at %.1f:1", c)
-	}
-	if soft.Palette.FG == "#5a6158" {
-		t.Error("the muted editor foreground was taken as plain text unchanged")
-	}
-	if _, ok := swatchLine(index, "LvimNothing_dark"); ok {
-		t.Error("a theme that is not in the index was found anyway")
+
+	// A theme with no file is not resolved — the cascade moves on to the next source.
+	if _, ok := resolve("LvimNothing_dark"); ok {
+		t.Error("a theme with no file was resolved anyway")
 	}
 }
 
