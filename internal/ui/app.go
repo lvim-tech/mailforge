@@ -59,6 +59,10 @@ type Model struct {
 
 // New builds the application.
 func New(c config.Config) Model {
+	// Paint from the configured theme before the first frame. The built-in is already in force
+	// from init(), so this only ever moves the colours towards what the user asked for — and if
+	// nothing resolves, it stays exactly where it was.
+	ApplyTheme(c)
 	return Model{
 		views: []view{
 			newAccountsView(c),
