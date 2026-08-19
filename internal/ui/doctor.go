@@ -115,16 +115,29 @@ func (v *doctorView) Render(w, h int) string {
 	var b strings.Builder
 
 	fail, warn, ok := v.rep.Counts()
-	b.WriteString("  ")
-	b.WriteString(stBad.Render(fmt.Sprintf("fail %d", fail)) + "   ")
-	b.WriteString(stWarn.Render(fmt.Sprintf("warn %d", warn)) + "   ")
-	b.WriteString(stGood.Render(fmt.Sprintf("ok %d", ok)))
-	b.WriteString("\n\n")
+	head := "  " + stBad.Render(fmt.Sprintf("fail %d", fail)) + "   " +
+		stWarn.Render(fmt.Sprintf("warn %d", warn)) + "   " +
+		stGood.Render(fmt.Sprintf("ok %d", ok)) + "\n\n"
+	b.WriteString(head)
 
 	// Worst first: a screen that opens on the things that are fine teaches the reader to
 	// scroll past the part they came for.
 	order := []setup.Level{setup.Fail, setup.Warn, setup.OK}
-	start, end := window(len(v.rep.Findings), v.sel, maxi(h-6, 1))
+
+	// The lines the row under the cursor adds beneath itself — the full message and the action
+	// — are measured before the window is cut, so the list pays for its own expansion exactly
+	// instead of carrying a guessed reserve. The reserve stood on screen as blank rows under
+	// the findings, with the list cut short above them saying "… N below".
+	extra := 0
+	if f, ok := v.selected(order); ok {
+		if msgW := maxi(w-30, 8); len([]rune(f.Message)) > msgW {
+			extra += len(strings.Split(wrapText(f.Message, maxi(w-6, 24)), "\n"))
+		}
+		if f.Action != "" {
+			extra += len(hanging("→ ", f.Action, maxi(w-6, 24)))
+		}
+	}
+	start, end := markedWindow(len(v.rep.Findings), v.sel, maxi(listBudget(h, head)-extra, 1))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -177,6 +190,24 @@ func (v *doctorView) Render(w, h int) string {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.rep.Findings)-end)) + "\n")
 	}
 	return b.String()
+}
+
+// selected is the finding under the cursor, walked in the same worst-first order the render
+// draws, because v.sel indexes that order and not the slice.
+func (v *doctorView) selected(order []setup.Level) (setup.Finding, bool) {
+	idx := 0
+	for _, lvl := range order {
+		for _, f := range v.rep.Findings {
+			if f.Level != lvl {
+				continue
+			}
+			if idx == v.sel {
+				return f, true
+			}
+			idx++
+		}
+	}
+	return setup.Finding{}, false
 }
 
 func (v *doctorView) Footer() string {

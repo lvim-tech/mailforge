@@ -247,12 +247,14 @@ func (v *accountsView) renderDelete(w int) string {
 
 func (v *accountsView) renderList(w, h int) string {
 	var b strings.Builder
+	head := ""
 	if v.err != "" {
-		b.WriteString(indent(stBad.Render(wrapText(v.err, maxi(w-4, 30))), 2) + "\n\n")
+		head += indent(stBad.Render(wrapText(v.err, maxi(w-4, 30))), 2) + "\n\n"
 	}
 	if v.busy != "" {
-		b.WriteString("  " + stWarn.Render(v.busy+"…") + "\n\n")
+		head += "  " + stWarn.Render(v.busy+"…") + "\n\n"
 	}
+	b.WriteString(head)
 	if len(v.reg.Accounts) == 0 {
 		b.WriteString(indent(stDim.Render(wrapText(
 			"No accounts yet. [a] adds one: it asks for the address, works out where its servers "+
@@ -261,10 +263,38 @@ func (v *accountsView) renderList(w, h int) string {
 		return b.String()
 	}
 
-	b.WriteString(stDim.Render(fmt.Sprintf("     %-30s %-22s %-22s %s",
-		"address", "imap", "smtp", "verified")) + "\n")
+	header := stDim.Render(fmt.Sprintf("     %-30s %-22s %-22s %s",
+		"address", "imap", "smtp", "verified")) + "\n"
+	b.WriteString(header)
 
-	start, end := window(len(v.reg.Accounts), v.sel, maxi(h-6, 1))
+	// The paths under the list, built before the list is windowed: the budget is measured from
+	// what this frame really draws, not reserved for the worst case — once the body is padded
+	// to its height, an unused reserve is a band of blank rows between "… N below" and them.
+	under := ""
+	if a, ok := v.current(); ok {
+		// Where the selected account actually lives — the question the whole program exists to
+		// keep answerable, so it is on screen rather than derivable.
+		var t strings.Builder
+		t.WriteString("\n")
+		for _, l := range []struct{ k, v string }{
+			{"label", a.LabelOrDefault()},
+			{"maildir", a.Maildir(v.cfg)},
+			{"rc", a.RCFile(v.cfg)},
+			{"pass", a.PassEntry(v.cfg)},
+			{"channel", a.Channel()},
+		} {
+			for j, wrapped := range strings.Split(wrapText(l.v, maxi(w-16, 24)), "\n") {
+				label := l.k
+				if j > 0 {
+					label = ""
+				}
+				t.WriteString("  " + cell(label, 10, stDim) + " " + stFg.Render(wrapped) + "\n")
+			}
+		}
+		under = t.String()
+	}
+
+	start, end := markedWindow(len(v.reg.Accounts), v.sel, listBudget(h, head, header, under))
 	if start > 0 {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d above", start)) + "\n")
 	}
@@ -295,26 +325,7 @@ func (v *accountsView) renderList(w, h int) string {
 		b.WriteString(stDim.Render(fmt.Sprintf("     … %d below", len(v.reg.Accounts)-end)) + "\n")
 	}
 
-	// Where the selected account actually lives — the question the whole program exists to keep
-	// answerable, so it is on screen rather than derivable.
-	if a, ok := v.current(); ok {
-		b.WriteString("\n")
-		for _, l := range []struct{ k, v string }{
-			{"label", a.LabelOrDefault()},
-			{"maildir", a.Maildir(v.cfg)},
-			{"rc", a.RCFile(v.cfg)},
-			{"pass", a.PassEntry(v.cfg)},
-			{"channel", a.Channel()},
-		} {
-			for j, wrapped := range strings.Split(wrapText(l.v, maxi(w-16, 24)), "\n") {
-				label := l.k
-				if j > 0 {
-					label = ""
-				}
-				b.WriteString("  " + cell(label, 10, stDim) + " " + stFg.Render(wrapped) + "\n")
-			}
-		}
-	}
+	b.WriteString(under)
 	return b.String()
 }
 

@@ -325,14 +325,15 @@ func (v *keysView) Render(w, h int) string {
 	bound := v.bound()
 	clashes := keys.Conflicts(bound)
 
+	head := ""
 	if v.filtering || v.filter.String() != "" {
-		b.WriteString("  " + v.filter.render(v.filtering) + "\n")
-		b.WriteString("  " + stDim.Render(fmt.Sprintf("%d of %d actions",
-			len(v.rows), len(keys.Actions()))) + "\n\n")
+		head += "  " + v.filter.render(v.filtering) + "\n"
+		head += "  " + stDim.Render(fmt.Sprintf("%d of %d actions",
+			len(v.rows), len(keys.Actions()))) + "\n\n"
 	} else {
-		b.WriteString("  " + stDim.Render("file: ") +
-			stFg.Render(v.cfg.NeomuttDir+"/mailforge/keys.rc") + "\n")
-		b.WriteString("  " + stDim.Render("your own bindings.rc is read after it, so anything there wins") + "\n\n")
+		head += "  " + stDim.Render("file: ") +
+			stFg.Render(v.cfg.NeomuttDir+"/mailforge/keys.rc") + "\n"
+		head += "  " + stDim.Render("your own bindings.rc is read after it, so anything there wins") + "\n\n"
 	}
 
 	// The tab strip and the column titles, drawn ONCE and OUTSIDE the scrolling region.
@@ -363,17 +364,48 @@ func (v *keysView) Render(w, h int) string {
 	if len(v.rows) > 0 {
 		pos = fmt.Sprintf("%d/%d", v.sel+1, len(v.rows))
 	}
-	b.WriteString(strip + "   " + stDim.Render(pos) + "\n\n")
+	head += strip + "   " + stDim.Render(pos) + "\n\n"
 
-	b.WriteString("  " + cell("  function", 30, stHead) + " " +
+	head += "  " + cell("  function", 30, stHead) + " " +
 		cell("key", 12, stHead) + " " +
 		cell("neomutt", 16, stHead) + " " +
-		cell("what it does", maxi(w-64, 8), stHead) + "\n")
+		cell("what it does", maxi(w-64, 8), stHead) + "\n"
+	b.WriteString(head)
 
-	// Room for the list: everything above, the two header rows, the note under it, and the
-	// changed line.
-	room := maxi(h-11, 4)
-	start, end := window(len(v.rows), v.sel, room)
+	// What goes UNDER the list — the note on the selected action and the changed line — built
+	// before the list is windowed: the budget is measured from what this frame really draws,
+	// not reserved for the worst case. The reserve stood on screen as blank rows between the
+	// list and the note once the body was padded to its height.
+	under := ""
+	if a, ok := v.current(); ok {
+		note := a.Name()
+		if a.Help != "" {
+			note += " — " + a.Help
+		}
+		if a.IsMacro() {
+			note += "  (macro: " + a.Macro + ")"
+		}
+		if bound[a.Name()] != a.Stock {
+			note += "  ·  NeoMutt binds it to " + orNone(a.Stock)
+			if taken := heldBy(bound, a.Menu, a.Stock, a.Name()); taken != "" {
+				note += ", which here is " + taken
+			}
+		}
+		if others := clashes[a.Name()]; len(others) > 0 {
+			// Named explicitly, because NeoMutt resolves this by keeping the last binding
+			// it read and saying nothing — the other action simply stops working.
+			note += fmt.Sprintf("  ⚠ same key as %s in this menu; only one of them will work",
+				strings.Join(others, ", "))
+		}
+		under += "\n" + indent(stDim.Render(wrapText(note, maxi(w-6, 30))), 2) + "\n"
+	}
+	if v.dirty() {
+		under += "\n  " + stWarn.Render("changed — [w] writes it, [r] drops it")
+	}
+
+	// No "… N above/below" markers here — the position indicator in the strip says the same
+	// thing — so the plain window is the right one.
+	start, end := window(len(v.rows), v.sel, listBudget(h, head, under))
 
 	for i := start; i < end; i++ {
 		a := v.rows[i]
@@ -416,31 +448,7 @@ func (v *keysView) Render(w, h int) string {
 			cell(a.Help, maxi(w-64, 8), stDim.Background(bg)) + "\n")
 	}
 
-	if a, ok := v.current(); ok {
-		note := a.Name()
-		if a.Help != "" {
-			note += " — " + a.Help
-		}
-		if a.IsMacro() {
-			note += "  (macro: " + a.Macro + ")"
-		}
-		if bound[a.Name()] != a.Stock {
-			note += "  ·  NeoMutt binds it to " + orNone(a.Stock)
-			if taken := heldBy(bound, a.Menu, a.Stock, a.Name()); taken != "" {
-				note += ", which here is " + taken
-			}
-		}
-		if others := clashes[a.Name()]; len(others) > 0 {
-			// Named explicitly, because NeoMutt resolves this by keeping the last binding
-			// it read and saying nothing — the other action simply stops working.
-			note += fmt.Sprintf("  ⚠ same key as %s in this menu; only one of them will work",
-				strings.Join(others, ", "))
-		}
-		b.WriteString("\n" + indent(stDim.Render(wrapText(note, maxi(w-6, 30))), 2) + "\n")
-	}
-	if v.dirty() {
-		b.WriteString("\n  " + stWarn.Render("changed — [w] writes it, [r] drops it"))
-	}
+	b.WriteString(under)
 	return b.String()
 }
 
