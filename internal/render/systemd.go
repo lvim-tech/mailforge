@@ -81,8 +81,13 @@ func MbsyncTimer(c config.Config) string {
 	// roughly once a minute — the setting would be accepted, written, shown on screen, and
 	// quietly not honoured. Tightened only when the interval is short enough to need it, so a
 	// five-minute fetch still batches like everything else on the machine.
+	//
+	// The boundary INCLUDES one minute. A minute of slack on a one-minute timer is not slack,
+	// it is a second interval of the same length: the fetch lands somewhere between one and two
+	// minutes and never at the period that was asked for. The rule is that the tolerance has to
+	// be small next to the interval, and at equal sizes it is not.
 	accuracy := "1min"
-	if c.SyncEvery < 60 {
+	if c.SyncEvery <= 60 {
 		accuracy = "1s"
 	}
 
