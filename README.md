@@ -47,10 +47,22 @@ go build -o ~/bin/mailforge .
 ```sh
 mailforge                       # the interface: Accounts, Keys, Settings, Doctor
 mailforge fetch                 # run mbsync for every account
+mailforge apply                 # re-render every account's files from the registry
 mailforge unread                # total unread, for a status bar
 mailforge unread --per-account  # one line per address
+mailforge unread --json         # one Waybar custom-module object
 mailforge unread --watch        # stream the total, printing only when it changes
 ```
+
+`apply` touches no passwords: it reads none, asks for none and writes none. It is for when the
+generated files have gone stale without any account changing — a moved pass entry, an edited
+template — which otherwise meant walking each account through a wizard that verifies against the
+real servers to rewrite a text file.
+
+`--json` is what a status bar reads, so the bar needs no wrapper script of its own. Which accounts
+exist, where their maildirs are and what each server calls its spam folder are all questions the
+registry answers; a script in the bar's configuration would carry a copy of all three and be wrong
+the first time one of them moved.
 
 `unread` counts both halves of each maildir — everything in `new/`, plus anything in `cur/` whose
 filename lacks the `S` flag — for INBOX and the account's spam folder. A message a client has

@@ -11,9 +11,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -108,11 +111,14 @@ func main() {
 	}
 }
 
-// runUnread prints the unread count. Plain by default, one line per account with --per-account.
+// runUnread prints the unread count. Plain by default, one line per account with --per-account,
+// and a status-bar object with --json.
 //
-// Failure prints NOTHING to stdout and returns non-zero: a status bar reading this substitutes its
-// own text for a command that failed, and a "0" on a broken setup is worse than an error — it is
-// the same thing the bar shows when the mail really has all been read.
+// The two output modes fail DIFFERENTLY, on purpose. Plain prints nothing and returns non-zero: a
+// bar reading a bare number substitutes its own text for a command that failed, and a "0" on a
+// broken setup is worse than an error — it is the same thing the bar shows when the mail really has
+// all been read. A bar reading JSON has no such fallback; an empty line renders no module at all,
+// which is that same silent "0" by another route. So --json always prints, and says "!".
 // runApply rewrites what every account owns, and reports what changed.
 //
 // Accounts are applied in registry order and a failure on one does not stop the rest: they own
@@ -154,22 +160,89 @@ func runUnread(c config.Config, args []string) int {
 		}
 	}
 
+	asJSON := false
+	for _, a := range args {
+		if a == "--json" {
+			asJSON = true
+		}
+	}
+
 	reg, err := account.Load()
 	if err != nil {
+		// The bar gets an object saying so; a plain caller gets the line it expects. Exiting
+		// quietly here would leave the bar rendering nothing, which reads as "no mail".
+		if asJSON {
+			return printBarJSON(0, nil, err)
+		}
 		fmt.Fprintln(os.Stderr, "mailforge:", err)
 		return 1
 	}
 	total, per := inbox.Unread(c, reg.Accounts)
 
 	for _, a := range args {
-		if a == "--per-account" {
+		switch a {
+		case "--per-account":
 			for _, p := range per {
 				fmt.Printf("%d\t%s\n", p.Unread, p.Address)
 			}
 			return 0
+		case "--json":
+			return printBarJSON(total, per, nil)
 		}
 	}
 	fmt.Println(total)
+	return 0
+}
+
+// barStatus is what a status bar reads: Waybar's custom-module shape, and anything else that wants
+// a machine-readable answer.
+//
+// It exists so the bar does not need a wrapper script. The registry decides which accounts there
+// are, where their maildirs sit and what this server calls the spam folder; a shell script in the
+// bar's configuration would have to carry a copy of all three and be wrong the first time one of
+// them moved — which is what happened to the script this program's `unread` was written to
+// replace. Emitting the bar's own format keeps that knowledge in one place.
+type barStatus struct {
+	Text    string `json:"text"`
+	Tooltip string `json:"tooltip"`
+	Class   string `json:"class"`
+}
+
+// printBarJSON writes one status object, and ALWAYS writes a valid one.
+//
+// Including on failure. A bar whose command exits non-zero renders nothing at all, so a broken
+// registry would look exactly like an empty inbox — the one reading a status bar exists to prevent.
+// An error becomes a visible "!" with the reason in the tooltip instead.
+func printBarJSON(total int, per []inbox.Count, err error) int {
+	s := barStatus{Text: strconv.Itoa(total)}
+	switch {
+	case err != nil:
+		s = barStatus{Text: "!", Tooltip: err.Error(), Class: "error"}
+	case len(per) == 0:
+		s.Tooltip = "no accounts"
+	default:
+		lines := make([]string, 0, len(per))
+		for _, p := range per {
+			lines = append(lines, fmt.Sprintf("%d\t%s", p.Unread, p.Address))
+		}
+		s.Tooltip = strings.Join(lines, "\n")
+		// Only when there is something to read. An always-present class would make the styling
+		// rule useless — the point of it is to look different when mail is waiting.
+		if total > 0 {
+			s.Class = "unread"
+		}
+	}
+	b, merr := json.Marshal(s)
+	if merr != nil {
+		// Unreachable with these fields, but a bar reading a half-written line is worse than
+		// one reading a minimal valid object.
+		fmt.Println(`{"text":"!","tooltip":"status could not be encoded","class":"error"}`)
+		return 1
+	}
+	fmt.Println(string(b))
+	if err != nil {
+		return 1
+	}
 	return 0
 }
 
