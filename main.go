@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -183,7 +182,7 @@ func runUnread(c config.Config, args []string) int {
 		switch a {
 		case "--per-account":
 			for _, p := range per {
-				fmt.Printf("%d\t%s\n", p.Unread, p.Address)
+				fmt.Printf("%d\t%s\n", p.Unread(), p.Address)
 			}
 			return 0
 		case "--json":
@@ -206,6 +205,13 @@ type barStatus struct {
 	Text    string `json:"text"`
 	Tooltip string `json:"tooltip"`
 	Class   string `json:"class"`
+	// Alt is the state name, and it is how the bar picks an icon.
+	//
+	// The ICON stays in the bar's configuration, keyed off this, rather than being written into
+	// Text here. Which glyph means "mail waiting" depends on the font installed and on the taste
+	// of whoever built the bar; what this program knows is whether mail is waiting. Sending the
+	// state and letting format-icons choose keeps each decision where it can actually be made.
+	Alt string `json:"alt"`
 }
 
 // printBarJSON writes one status object, and ALWAYS writes a valid one.
@@ -214,23 +220,32 @@ type barStatus struct {
 // registry would look exactly like an empty inbox — the one reading a status bar exists to prevent.
 // An error becomes a visible "!" with the reason in the tooltip instead.
 func printBarJSON(total int, per []inbox.Count, err error) int {
-	s := barStatus{Text: strconv.Itoa(total)}
+	var s barStatus
 	switch {
 	case err != nil:
-		s = barStatus{Text: "!", Tooltip: err.Error(), Class: "error"}
+		s = barStatus{Text: "!", Tooltip: err.Error(), Class: "error", Alt: "error"}
 	case len(per) == 0:
-		s.Tooltip = "no accounts"
+		s = barStatus{Text: "No unread", Tooltip: "no accounts", Alt: "read"}
 	default:
+		in, spam := inbox.Split(per)
+		// TWO numbers, because they are two different facts. Mail in INBOX is people waiting;
+		// mail in spam is a decision a filter made for you, and it is on the bar so a wrong one
+		// is visible. "3" alone cannot tell you which of those you are looking at.
+		s.Text = fmt.Sprintf("%d/%d Unread", in, spam)
+		s.Alt = "unread"
+		s.Class = "unread"
+		if total == 0 {
+			// Said in words rather than as "0/0". A bar is read at a glance and from the corner
+			// of an eye, and "nothing to do" should not need arithmetic.
+			s.Text = "No unread"
+			s.Alt = "read"
+			s.Class = ""
+		}
 		lines := make([]string, 0, len(per))
 		for _, p := range per {
-			lines = append(lines, fmt.Sprintf("%d\t%s", p.Unread, p.Address))
+			lines = append(lines, fmt.Sprintf("%d/%d\t%s", p.Inbox, p.Spam, p.Address))
 		}
 		s.Tooltip = strings.Join(lines, "\n")
-		// Only when there is something to read. An always-present class would make the styling
-		// rule useless — the point of it is to look different when mail is waiting.
-		if total > 0 {
-			s.Class = "unread"
-		}
 	}
 	b, merr := json.Marshal(s)
 	if merr != nil {

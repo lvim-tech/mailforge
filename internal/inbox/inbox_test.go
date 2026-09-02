@@ -48,8 +48,16 @@ func TestUnreadCountsBothHalvesOfTheMaildir(t *testing.T) {
 	if total != 3 {
 		t.Errorf("total = %d, want 3 (one new, one unseen in cur, one in spam)", total)
 	}
-	if len(per) != 1 || per[0].Unread != 3 || per[0].Address != a.Address {
+	if len(per) != 1 || per[0].Unread() != 3 || per[0].Address != a.Address {
 		t.Errorf("per-account = %+v", per)
+	}
+	// And split the way a status bar shows them: two waiting in INBOX, one a filter decided for
+	// you. Summed, those two facts are indistinguishable.
+	if per[0].Inbox != 2 || per[0].Spam != 1 {
+		t.Errorf("split = inbox %d, spam %d; want 2 and 1", per[0].Inbox, per[0].Spam)
+	}
+	if in, spam := Split(per); in != 2 || spam != 1 {
+		t.Errorf("Split = %d, %d; want 2, 1", in, spam)
 	}
 }
 

@@ -64,6 +64,12 @@ exist, where their maildirs are and what each server calls its spam folder are a
 registry answers; a script in the bar's configuration would carry a copy of all three and be wrong
 the first time one of them moved.
 
+Its text is `No unread` or `1/3 Unread` — INBOX first, spam second. Two numbers because they are two
+facts: mail in INBOX is people waiting, and mail in spam is a decision a filter made for you, on the
+bar so that a wrong one is visible. The `alt` field carries the state (`read`, `unread`, `error`) for
+the bar's own `format-icons`, because which glyph means "mail waiting" depends on the font installed
+and is not something this program should decide.
+
 `unread` counts both halves of each maildir — everything in `new/`, plus anything in `cur/` whose
 filename lacks the `S` flag — for INBOX and the account's spam folder. A message a client has
 looked at without opening still counts, and junk that a filter got wrong is still unread mail.

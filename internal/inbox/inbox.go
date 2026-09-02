@@ -16,11 +16,20 @@ import (
 	"github.com/lvim-tech/mailforge/internal/config"
 )
 
-// Count is one account's unread total.
+// Count is one account's unread mail, split by where it landed.
+//
+// SPLIT, because the two numbers mean different things to the person reading them. Unread in INBOX
+// is mail waiting; unread in spam is mail a filter decided for you, and the only reason to show it
+// is so a wrong decision is visible. Summed into one figure, a bar reading "3" cannot say whether
+// that is three people waiting for an answer or three pieces of junk.
 type Count struct {
 	Address string
-	Unread  int
+	Inbox   int
+	Spam    int
 }
+
+// Unread is everything not yet read for this account, wherever it sits.
+func (c Count) Unread() int { return c.Inbox + c.Spam }
 
 // Unread counts what has not been read, per account and in total.
 //
@@ -29,18 +38,27 @@ type Count struct {
 // morning something important was filed as junk.
 func Unread(c config.Config, accounts []account.Account) (total int, per []Count) {
 	for _, a := range accounts {
-		n := 0
 		local := a.LocalFolders()
-		for _, box := range []string{"INBOX", local.Spam} {
-			if box == "" {
-				continue
-			}
-			n += unreadIn(filepath.Join(a.Maildir(c), box))
+		n := Count{Address: a.Address, Inbox: unreadIn(filepath.Join(a.Maildir(c), "INBOX"))}
+		// An account whose server named no spam folder has none to count. Guessing at a name
+		// would report zero for a folder that exists under another spelling, which reads the
+		// same as a folder that is empty.
+		if local.Spam != "" {
+			n.Spam = unreadIn(filepath.Join(a.Maildir(c), local.Spam))
 		}
-		per = append(per, Count{Address: a.Address, Unread: n})
-		total += n
+		per = append(per, n)
+		total += n.Unread()
 	}
 	return total, per
+}
+
+// Split adds up a set of counts into the two figures a status bar shows.
+func Split(per []Count) (in, spam int) {
+	for _, p := range per {
+		in += p.Inbox
+		spam += p.Spam
+	}
+	return in, spam
 }
 
 // unreadIn counts the unread messages of one maildir.
