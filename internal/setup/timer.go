@@ -123,7 +123,25 @@ func ApplyTimer(c config.Config, p *Plan) {
 		if res, err := systemctl("daemon-reload"); err != nil || !res.OK() {
 			return "", fmt.Errorf("daemon-reload: %s", res.Stderr)
 		}
-		res, err := systemctl("enable", "--now", render.TimerUnit)
+		// enable for the next boot, restart to arm it NOW — and restart rather than `--now`,
+		// which is the whole point of this step.
+		//
+		// `enable --now` starts a unit that is stopped, and does nothing to one that is already
+		// running. Both of the cases this step exists for are the second: the interval has just
+		// been changed and the timer is still counting to the old one, or — the way this was
+		// found — the timer is wedged.
+		//
+		// A monotonic timer whose only recurring source is OnUnitActiveSec re-arms from the
+		// service's last activation. When that activation FAILS badly enough, the timer elapses
+		// with nothing left to schedule: NextElapse becomes infinity, and RemainAfterElapse
+		// keeps it reported as "active" while it will never fire again. On this machine that
+		// happened on 12 August, when the unit still named a binary that had been moved, and it
+		// stayed dead for twenty days — through every apply, each of which cheerfully said
+		// "active" because `enable --now` had nothing to object to.
+		if res, err := systemctl("enable", render.TimerUnit); err != nil || !res.OK() {
+			return "", fmt.Errorf("%s", res.Stderr)
+		}
+		res, err := systemctl("restart", render.TimerUnit)
 		if err != nil || !res.OK() {
 			return "", fmt.Errorf("%s", res.Stderr)
 		}

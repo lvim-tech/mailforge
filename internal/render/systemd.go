@@ -99,6 +99,15 @@ Description=Fetch mail every %s (managed by mailforge)
 # The first run is soon after login rather than at once: logging in is when everything else on
 # the machine is also starting, and mail is not the urgent one.
 OnStartupSec=2min
+# The same delay, but counted from when THIS TIMER started rather than from login.
+#
+# Without it the timer has no future to schedule whenever it is restarted mid-session — which is
+# every time the interval is changed. OnStartupSec is measured from the user manager's startup and
+# is spent within two minutes of logging in; OnUnitActiveSec is measured from the last activation
+# of the service, which after a restart has not happened yet. Two bases, one long expired and one
+# not yet existing, leave NextElapse at infinity: the unit reports "active", reports "success", and
+# never fires again. That is how this machine went twenty days without an automatic fetch.
+OnActiveSec=2min
 OnUnitActiveSec=%ds
 AccuracySec=%s
 # Catch up after the machine was asleep, instead of waiting out the full interval again.
