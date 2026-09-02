@@ -66,7 +66,19 @@ type accountsView struct {
 	fTrash   input
 	fSpam    input
 	fArchive input
-	pass     *secretInput
+	// fPassPath is the pass entry the password goes to, shown and editable rather than derived
+	// silently. The store belongs to the person, not to mailforge: it may be filed by domain,
+	// it may already hold this password under a name mailforge would never have chosen, and the
+	// only way to be sure the right file is being written is to put the name on the screen next
+	// to the field that writes it.
+	fPassPath input
+	pass      *secretInput
+	// passDup are the other entries that also hold a password for this account, found when the
+	// step was opened. Non-nil means a choice is owed: two encrypted copies of one secret, and
+	// nothing on disk saying which is live.
+	passDup []string
+	// kfBusy is set while keyforge has the terminal, so the step does not act on stale keys.
+	kfBusy bool
 
 	source   string // where the server guess came from
 	note     string // provider warning, e.g. app passwords
@@ -106,6 +118,8 @@ func (v *accountsView) resetForms() {
 	v.fTrash = newInput("Trash", "")
 	v.fSpam = newInput("Spam", "")
 	v.fArchive = newInput("Archive", "")
+	v.fPassPath = newInput("pass entry", "where the password is read from and written to")
+	v.passDup, v.kfBusy = nil, false
 	if v.pass != nil {
 		v.pass.close()
 	}
@@ -187,6 +201,9 @@ func (v *accountsView) Update(msg tea.Msg) (view, tea.Cmd) {
 
 	case signatureEdited:
 		return v, v.applySignature(msg)
+
+	case passwordGenerated:
+		return v, v.applyGenerated(msg)
 
 	case tea.KeyMsg:
 		return v.key(msg)
@@ -393,6 +410,17 @@ func (v *accountsView) Footer() string {
 		return joinHints(hint("enter", "back"))
 	case mVerify:
 		return joinHints(hint("esc", "back"))
+	case mPassword:
+		// The generate key is named for what it will DO, which is not the same word in the two
+		// states: on an empty entry it makes the first password, on an occupied one it replaces
+		// a password that already works. A footer that said "generate" for both would be
+		// offering, on the second, something closer to "overwrite".
+		what := "generate in " + sys.KeyforgeBin
+		if v.stored {
+			what = "change in " + sys.KeyforgeBin
+		}
+		return joinHints(hint("tab", "field"), hint("ctrl+o", what),
+			hint("enter", "continue"), hint("esc", "back"))
 	default:
 		return joinHints(hint("tab", "next field"), hint("enter", "continue"), hint("esc", "back"))
 	}

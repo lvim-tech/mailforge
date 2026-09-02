@@ -64,6 +64,17 @@ func main() {
 		os.Exit(runUnread(c, os.Args[2:]))
 	}
 
+	// `mailforge apply` — re-render every account's files from the registry.
+	//
+	// The same ApplyAccount the wizard's last step runs, with NO SECRET: passwords are not
+	// touched, read or asked for. It exists because the generated files can go stale without any
+	// account changing — a renamed pass entry, a moved store, an edited template — and the only
+	// way to bring them back was to walk each account through a wizard that verifies against the
+	// real servers, which is a network round trip and a password prompt to rewrite a text file.
+	if len(os.Args) > 1 && os.Args[1] == "apply" {
+		os.Exit(runApply(c))
+	}
+
 	// `mailforge fetch` — mbsync for every account, then whoever is watching is told.
 	//
 	// The timer and the key in NeoMutt both call this rather than mbsync directly, so the
@@ -102,6 +113,40 @@ func main() {
 // Failure prints NOTHING to stdout and returns non-zero: a status bar reading this substitutes its
 // own text for a command that failed, and a "0" on a broken setup is worse than an error — it is
 // the same thing the bar shows when the mail really has all been read.
+// runApply rewrites what every account owns, and reports what changed.
+//
+// Accounts are applied in registry order and a failure on one does not stop the rest: they own
+// separate files, and a machine where four accounts are correct and one is not is strictly better
+// than one where the first failure left the other four untouched.
+func runApply(c config.Config) int {
+	reg, err := account.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mailforge:", err)
+		return 1
+	}
+	if len(reg.Accounts) == 0 {
+		fmt.Println("no accounts to apply")
+		return 0
+	}
+	code := 0
+	for _, a := range reg.Accounts {
+		fmt.Println(a.Address)
+		// nil secret: this is a re-render, not a password change.
+		for _, s := range setup.ApplyAccount(c, &reg, a, nil).Steps {
+			switch {
+			case s.Err != nil:
+				fmt.Printf("  FAIL  %s: %v\n", s.What, s.Err)
+				code = 1
+			case s.Note != "":
+				fmt.Printf("  ok    %s — %s\n", s.What, s.Note)
+			default:
+				fmt.Printf("  ok    %s\n", s.What)
+			}
+		}
+	}
+	return code
+}
+
 func runUnread(c config.Config, args []string) int {
 	for _, a := range args {
 		if a == "--watch" {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lvim-tech/mailforge/internal/setup"
+	"github.com/lvim-tech/mailforge/internal/sys"
 	"github.com/lvim-tech/mailforge/internal/verify"
 )
 
@@ -89,22 +90,45 @@ func (v *accountsView) renderServers(w int) string {
 func (v *accountsView) renderPassword(w int) string {
 	var b strings.Builder
 	b.WriteString("  " + stAccent.Render("Step 3 of 4 — the password") + "\n\n")
-	b.WriteString("  " + v.pass.render(true) + "\n\n")
+
+	// TWO fields, and the path first. Where a password is written is not a detail beneath the
+	// password: it decides which of several encrypted files mbsync will read at four in the
+	// morning, and a store shared with keyforge has more than one plausible answer. Deriving it
+	// silently is what let mailforge write a second copy of a secret it did not own.
+	b.WriteString("  " + v.fPassPath.render(v.field == 0) + "\n\n")
+	b.WriteString("  " + v.pass.render(v.field == 1) + "\n\n")
 
 	// The one line that changes what to DO goes FIRST, on its own, and lit.
 	//
 	// It used to be appended to the paragraph below — same colour, same block — and a fact that
 	// decides whether to type anything at all read as more boilerplate. Somebody looking at this
 	// screen for a password they had already stored could not find the sentence saying so.
-	if v.editing || v.stored {
-		what := "a password is already stored as " + v.draft.PassEntry(v.cfg)
-		how := "press enter to use it, or type a new one to replace it"
+	switch {
+	case len(v.passDup) > 1:
+		// Two files, one password. This outranks every other line on the screen: whichever is
+		// left behind stays readable and plausible forever, and the next rotation updates only
+		// one of them.
+		b.WriteString(indent(stBad.Render(wrapText(
+			"! the password is stored twice, at "+strings.Join(v.passDup, " and ")+
+				" — put the one to keep in the field above; the other is left untouched",
+			maxi(w-6, 30))), 2) + "\n\n")
+
+	case v.stored:
+		what := "a password is already stored as " + v.passEntryChosen()
+		how := "press enter to use it, type a new one, or [ctrl+o] to change it in " + sys.KeyforgeBin
 		b.WriteString(indent(stOK.Render(wrapText("✓ "+what+" — "+how, maxi(w-6, 30))), 2) + "\n\n")
+
+	default:
+		b.WriteString(indent(stDim.Render(wrapText(
+			"nothing is stored at "+v.passEntryChosen()+" yet — type a password, or [ctrl+o] to "+
+				"have "+sys.KeyforgeBin+" generate one under the rules you set there",
+			maxi(w-6, 30))), 2) + "\n\n")
 	}
 
 	msg := "Typed into locked memory, checked against the servers, and only then written to pass " +
-		"as " + v.draft.PassEntry(v.cfg) + ". It never becomes an ordinary string in this program."
-	if v.editing || v.stored {
+		"as " + v.passEntryChosen() + ". It never becomes an ordinary string in this program, and " +
+		"neither does one that comes back from " + sys.KeyforgeBin + "."
+	if v.stored {
 		msg += " Replacing it rewrites only the password line; a login, a URL or a note kept " +
 			"under it stays."
 	}

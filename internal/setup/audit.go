@@ -321,12 +321,34 @@ func auditAccount(r *Report, c config.Config, a account.Account) {
 
 	// The password. Its absence is the failure that shows up as a prompt loop at fetch time
 	// with no explanation, so it is worth its own line.
-	if !store.Exists(a.PassEntry(c)) {
+	cands := a.PassCandidates(c)
+	switch found := store.Existing(cands); {
+	case len(found) == 0:
 		r.Findings = append(r.Findings, Finding{Fail, a.Address,
-			"no password at " + a.PassEntry(c) + " — mbsync and NeoMutt will both fail to log in",
+			"no password at " + strings.Join(cands, " or ") +
+				" — mbsync and NeoMutt will both fail to log in",
 			"edit the account and enter the password again"})
-	} else {
-		r.Findings = append(r.Findings, Finding{OK, a.Address, "password present at " + a.PassEntry(c), ""})
+
+	case len(found) > 1:
+		// Two encrypted files, one password, nothing on disk saying which is current. It is a
+		// warning and not a failure because logging in still works — one of them is read, and
+		// it may well be the right one. What it costs is the next rotation: changing the
+		// password updates one file and leaves the other as a plausible, stale answer.
+		r.Findings = append(r.Findings, Finding{Warn, a.Address,
+			"the password is stored twice, at " + strings.Join(found, " and "),
+			"open the account and choose which entry to use — the other can then be removed"})
+
+	case found[0] != a.PassEntryIn(c, c.PassLayout):
+		// Found, but not where the configured layout says to look. Worth its own line: it is
+		// the difference between "mailforge agrees with your store" and "mailforge is reading
+		// something it had to go looking for", and only the second gets silently undone by a
+		// change to pass_layout.
+		r.Findings = append(r.Findings, Finding{OK, a.Address,
+			"password present at " + found[0] + ", found outside the " +
+				string(c.PassLayout) + " layout", ""})
+
+	default:
+		r.Findings = append(r.Findings, Finding{OK, a.Address, "password present at " + found[0], ""})
 	}
 
 	// The signature file, when there is one to have.

@@ -55,6 +55,27 @@ func (p Plan) Failed() bool {
 func ApplyAccount(c config.Config, r *account.Registry, a account.Account, secret *sys.Secret) Plan {
 	var p Plan
 
+	// Where the password actually lives, settled ONCE, here, before anything is rendered from it.
+	//
+	// This is the only place that asks the store a question about names, and it does so because
+	// it is also the only place that can record the answer: `a` is rendered into the mbsync block
+	// and the account rc below, and written to the registry at the end, so a decision made now
+	// reaches all three. Deciding inside the renderer instead would re-ask on every draw and make
+	// the generated files depend on the machine they were generated on.
+	//
+	// A store holding the password under BOTH layouts is left alone deliberately. There is no
+	// honest way to pick — the two files are equally real and only their owner knows which is
+	// current — so the configured layout stays in force, the audit reports the pair, and the
+	// account view asks. Guessing here is exactly what wrote a duplicate into this user's store.
+	if a.PassOverride == "" {
+		cands := a.PassCandidates(c)
+		if store.Duplicated(cands) == nil {
+			if found := store.Resolve(cands); found != a.PassEntryIn(c, c.PassLayout) {
+				a.PassOverride = found
+			}
+		}
+	}
+
 	entry := a.PassEntry(c)
 	run := func(what string, fn func() (string, error)) bool {
 		s := Step{What: what}

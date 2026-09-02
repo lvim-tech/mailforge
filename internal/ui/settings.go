@@ -90,6 +90,23 @@ var settings = []setting{
 		note: "account passwords become <prefix>/<address> in pass.",
 	},
 	{
+		label: "pass layout",
+		kind:  skText,
+		get:   func(v *settingsView) string { return string(v.cfg.PassLayout) },
+		set: func(v *settingsView, s string) error {
+			l := config.PassLayout(strings.ToLower(strings.TrimSpace(s)))
+			if !l.Valid() {
+				return fmt.Errorf("%q is not a layout — use %q or %q",
+					s, config.LayoutFlat, config.LayoutDomain)
+			}
+			v.cfg.PassLayout = l
+			return nil
+		},
+		note: "flat = <prefix>/<address>; domain = <prefix>/<domain>/<address>, which is how " +
+			"keyforge files a store. Either way the other is still searched, so nothing has to " +
+			"move — this only says which name a NEW password is written under.",
+	},
+	{
 		label: "CA bundle",
 		kind:  skText,
 		get:   func(v *settingsView) string { return v.cfg.CertFile },

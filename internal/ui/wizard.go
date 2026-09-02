@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -133,11 +134,35 @@ func (v *accountsView) keyWizard(msg tea.KeyMsg) (view, tea.Cmd) {
 	// The password step owns its own key handling: what is typed there goes into locked memory
 	// and must never pass through an ordinary input.
 	if v.mode == mPassword {
+		// While keyforge owns the terminal there is nothing here to type into, and keys that
+		// arrived before the handover must not be replayed against a field that is about to be
+		// overwritten by the answer.
+		if v.kfBusy {
+			return v, nil
+		}
 		switch msg.String() {
 		case "esc":
 			v.mode = mServers
 			return v, nil
+		case "tab", "down", "up", "shift+tab":
+			v.field = 1 - v.field
+			return v, nil
+		case "ctrl+o":
+			return v, v.generateStep()
 		case "enter":
+			if v.field == 0 {
+				// The path field is the first of two, so Enter moves on rather than
+				// submitting: a form that saves from its first field surprises everyone who
+				// expected to reach the second.
+				if err := v.checkPassPath(); err != nil {
+					return v, failure("%v", err)
+				}
+				v.field = 1
+				return v, nil
+			}
+			if err := v.checkPassPath(); err != nil {
+				return v, failure("%v", err)
+			}
 			if v.pass.empty() && !v.editing && !v.stored {
 				return v, failure("a password is required")
 			}
@@ -148,6 +173,13 @@ func (v *accountsView) keyWizard(msg tea.KeyMsg) (view, tea.Cmd) {
 				return v, v.verifyStep(true)
 			}
 			return v, v.verifyStep(false)
+		}
+		if v.field == 0 {
+			v.fPassPath.update(msg)
+			// The entry named here decides whether Enter may pass with nothing typed, so the
+			// answer is re-asked as it is edited rather than once when the step opened.
+			v.refreshPassStored()
+			return v, nil
 		}
 		v.pass.update(msg)
 		return v, nil
@@ -218,8 +250,7 @@ func (v *accountsView) advance() (view, tea.Cmd) {
 		}
 		// Asked here, not at startAdd: the entry name is derived from the address, and the
 		// address is not settled until the identity step has been left.
-		v.stored = store.Exists(v.draft.PassEntry(v.cfg))
-		v.mode, v.field = mPassword, 0
+		v.openPasswordStep()
 		return v, nil
 
 	case mFolders:
@@ -227,6 +258,124 @@ func (v *accountsView) advance() (view, tea.Cmd) {
 		return v, v.applyStep()
 	}
 	return v, nil
+}
+
+// openPasswordStep works out which pass entry this account's password belongs in, and says so.
+//
+// The search covers BOTH layouts, so a store filed by domain is found without anything in it being
+// moved or copied. What it must never do is pick quietly when both are occupied: two encrypted
+// files, one password, and only their owner knows which is current. That case is recorded in
+// passDup and put on the screen as a choice.
+func (v *accountsView) openPasswordStep() {
+	cands := v.draft.PassCandidates(v.cfg)
+	v.passDup = store.Duplicated(cands)
+	v.fPassPath.set(store.Resolve(cands))
+	v.refreshPassStored()
+	v.mode, v.field = mPassword, 0
+}
+
+// refreshPassStored re-asks whether the entry NOW NAMED in the field holds anything.
+//
+// Called on every keystroke in the path field, because the answer is what the step's whole
+// behaviour hangs on — whether Enter may pass with nothing typed, and whether the action offered
+// is "generate" or "change". A stale answer here is the difference between reusing a password and
+// being asked for one that already exists.
+func (v *accountsView) refreshPassStored() {
+	v.stored = false
+	if name := strings.TrimSpace(v.fPassPath.String()); name != "" {
+		v.stored = store.Exists(name)
+	}
+}
+
+// passEntryChosen is what the path field currently names, cleaned the way the store cleans it.
+func (v *accountsView) passEntryChosen() string {
+	return strings.Trim(strings.TrimSpace(v.fPassPath.String()), "/")
+}
+
+// checkPassPath refuses a name the store could not honour, at the field rather than at apply time.
+//
+// store.ValidName is the same check the writer runs. Running it here as well is not duplication:
+// it is the difference between "that is not a usable entry name" said next to the field that is
+// wrong, and a failed step three screens later with the wizard's work already done.
+func (v *accountsView) checkPassPath() error {
+	name := v.passEntryChosen()
+	if name == "" {
+		return errors.New("a pass entry is required — it is where the password is read from")
+	}
+	return store.ValidName(name)
+}
+
+// recordPassChoice puts the entry named on screen into the draft, when it is worth recording.
+//
+// Not always, because accounts.json is read by people: an explicit pass_entry on every account
+// that simply agrees with pass_layout is noise, and noise is what stops a file being read at all.
+// It IS recorded when the name differs from what the layout derives — otherwise a later change to
+// pass_layout would silently relocate an account that had been pointed somewhere deliberately —
+// and whenever the store held more than one candidate, because there the name is a DECISION and a
+// decision that is not written down gets made again, differently, by the next code to look.
+func (v *accountsView) recordPassChoice() {
+	name := v.passEntryChosen()
+	if name == "" {
+		return
+	}
+	if name != v.draft.PassEntryIn(v.cfg, v.cfg.PassLayout) || len(v.passDup) > 1 {
+		v.draft.PassOverride = name
+		return
+	}
+	v.draft.PassOverride = ""
+}
+
+// passwordGenerated carries keyforge's answer back into the wizard.
+//
+// The value is NOT in this message. It went straight from the pipe into the field's locked buffer;
+// what travels through bubbletea's ordinary message queue is only whether something arrived.
+type passwordGenerated struct {
+	got bool
+	err error
+}
+
+// generateStep hands the terminal to keyforge and takes back a password.
+//
+// mailforge asks rather than generates. The rules for what a password may contain live in
+// keyforge, on a screen where they can be seen and changed, and this is the moment they are worth
+// consulting — so the person picks the shape they want there, presses [S], and lands back here
+// with the field filled.
+func (v *accountsView) generateStep() tea.Cmd {
+	cmd, hb, err := sys.Keyforge()
+	if err != nil {
+		return failure("%v", err)
+	}
+	v.kfBusy = true
+	buf := v.pass.secret()
+	return tea.ExecProcess(cmd, func(runErr error) tea.Msg {
+		// Into runs even when the command failed: it is what closes this side of the pipe, and
+		// a descriptor leaked on the error path is still a leak.
+		intoErr := hb.Into(buf)
+		if runErr != nil {
+			return passwordGenerated{err: runErr}
+		}
+		if intoErr != nil {
+			return passwordGenerated{err: intoErr}
+		}
+		return passwordGenerated{got: !buf.Empty()}
+	})
+}
+
+// applyGenerated is what the wizard does once keyforge has been and gone.
+func (v *accountsView) applyGenerated(msg passwordGenerated) tea.Cmd {
+	v.kfBusy = false
+	if msg.err != nil {
+		return failure("%v", msg.err)
+	}
+	if !msg.got {
+		// Quit without [S]. Nothing was written into the buffer, so there is nothing to undo
+		// and nothing to apologise for.
+		return status("%s closed without returning a password", sys.KeyforgeBin)
+	}
+	// Straight to the field that submits: a generated password is not one anybody wants to
+	// retype, and leaving focus on the path invites an Enter that reads as "discard this".
+	v.field = 1
+	return status("a password came back from %s — [enter] verifies it", sys.KeyforgeBin)
 }
 
 // collectFolders takes the five names off the form and CHANGES ONLY THOSE.
@@ -295,6 +444,7 @@ func defaultPort(s account.Security, imap bool) int {
 // verifyStep proves the account before anything is written. useStored says the user did not retype
 // the password, so it comes back out of pass for the attempt.
 func (v *accountsView) verifyStep(useStored bool) tea.Cmd {
+	v.recordPassChoice()
 	v.mode = mVerify
 	v.busy = "checking " + v.draft.Address
 	cfg, draft := v.cfg, v.draft

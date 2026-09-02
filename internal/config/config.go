@@ -20,6 +20,34 @@ import (
 	"github.com/lvim-tech/mailforge/internal/keys"
 )
 
+// PassLayout names one of the two shapes a password entry can have beneath PassPrefix.
+//
+// Two, and not an arbitrary template, on purpose. A format string would let the name be anything,
+// and the value has to be produced identically in four places — the mbsync block, the NeoMutt rc,
+// the audit and the wizard — from data that is itself user-supplied. Two named shapes can be
+// enumerated, which is what lets mailforge look for an entry in the OTHER one when the configured
+// one is empty, and say so when both are occupied.
+type PassLayout string
+
+const (
+	// LayoutFlat is <prefix>/<address> — mailforge's own historical shape.
+	LayoutFlat PassLayout = "flat"
+	// LayoutDomain is <prefix>/<domain>/<address> — how keyforge files a store.
+	LayoutDomain PassLayout = "domain"
+)
+
+// Other is the layout this one is not. The fallback search and the duplicate check are both just
+// "look at the other one", and naming that here keeps the pairing in a single place.
+func (l PassLayout) Other() PassLayout {
+	if l == LayoutDomain {
+		return LayoutFlat
+	}
+	return LayoutDomain
+}
+
+// Valid reports whether l is one of the two known shapes.
+func (l PassLayout) Valid() bool { return l == LayoutFlat || l == LayoutDomain }
+
 // SyncDefaults are the Channel options every rendered mbsync block carries.
 //
 // They are here rather than in the renderer because they are policy, not format: whether a
@@ -48,6 +76,18 @@ type Config struct {
 	MbsyncRC string `json:"mbsync_rc"`
 	// PassPrefix is the folder in `pass` that account passwords live under.
 	PassPrefix string `json:"pass_prefix"`
+	// PassLayout is how an address becomes a name beneath that folder.
+	//
+	// It exists because the store is not mailforge's to shape. `pass` is shared with whatever
+	// else a person keeps in it, and a store maintained by keyforge is filed by domain —
+	// mail/example.com/hello@example.com — while mailforge's own older default was flat.
+	// Reading the wrong one gets "is not in the password store" out of mbsync, which reads like
+	// a password problem rather than a path problem and sends people looking in the wrong place.
+	//
+	// The alternative was for mailforge to write its own copy under the name it preferred. That
+	// is what it used to do, and it is wrong twice over: two encrypted copies of one secret
+	// drift the moment either is rotated, and neither file says which one is authoritative.
+	PassLayout PassLayout `json:"pass_layout"`
 	// CertFile is the CA bundle mbsync is told to trust. Distributions disagree about the path
 	// and getting it wrong fails at connection time with a message about certificates that
 	// sounds like the server's fault.
@@ -164,9 +204,13 @@ func Default() Config {
 		NeomuttDir:  filepath.Join(home, ".config", "neomutt"),
 		MbsyncRC:    filepath.Join(home, ".mbsyncrc"),
 		PassPrefix:  "mail",
-		CertFile:    "/etc/ssl/ca-bundle.pem",
-		RealName:    "",
-		Editor:      "vim",
+		// Flat, because every store mailforge has written so far is flat and a default that
+		// silently relocated them would be a migration nobody asked for. A domain-filed store
+		// is still found without changing this: the fallback looks in the other layout.
+		PassLayout: LayoutFlat,
+		CertFile:   "/etc/ssl/ca-bundle.pem",
+		RealName:   "",
+		Editor:     "vim",
 		// On, and every minute. The cost is a stat of each maildir on a timer — cheap, because
 		// mbsync fetches into local directories and NeoMutt never asks a server for this.
 		SidebarCounts:      true,
@@ -255,6 +299,11 @@ func (c Config) withDefaults() Config {
 	}
 	if c.PassPrefix == "" {
 		c.PassPrefix = d.PassPrefix
+	}
+	// An unknown value is treated as absent rather than refused: config.json is hand-editable,
+	// and a typo in one field should not stop mailforge from starting.
+	if !c.PassLayout.Valid() {
+		c.PassLayout = d.PassLayout
 	}
 	if c.CertFile == "" {
 		c.CertFile = d.CertFile

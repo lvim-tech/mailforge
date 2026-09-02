@@ -106,10 +106,17 @@ type Account struct {
 	// rather than only as a file, because the registry is what the doctor compares against —
 	// a signature that lived only on disk would be the one artefact nothing could tell had
 	// been edited, emptied or lost.
-	Signature string    `json:"signature,omitempty"`
-	Order     int       `json:"order"`
-	Default   bool      `json:"default,omitempty"`
-	Verified  time.Time `json:"verified,omitempty"` // zero means never
+	Signature string `json:"signature,omitempty"`
+	// PassOverride, when set, is the exact pass entry for this account, and nothing derives it.
+	//
+	// It is what settles a store that holds the password under BOTH layouts. mailforge cannot
+	// know which of two encrypted files is the live one — only the person can — so the answer
+	// gets recorded here instead of being guessed afresh on every render. Silently preferring
+	// one is precisely the behaviour that put a second copy of a password in this user's store.
+	PassOverride string    `json:"pass_entry,omitempty"`
+	Order        int       `json:"order"`
+	Default      bool      `json:"default,omitempty"`
+	Verified     time.Time `json:"verified,omitempty"` // zero means never
 }
 
 // SigFile is where the signature is written for NeoMutt to read. Owned whole by mailforge, like
@@ -190,9 +197,43 @@ func (a Account) LocalFolders() Folders {
 	}
 }
 
-// PassEntry is where this account's password lives.
+// PassEntry is where this account's password lives: the recorded override, or the name the
+// configured layout gives it.
+//
+// PURE, and deliberately so. It answers "what should this be called", not "what exists on disk" —
+// the renderer builds an mbsync block out of it and the tests for that renderer would otherwise
+// depend on whatever happens to be in the store of the machine running them. The question about
+// disk is asked once, at apply time, by the caller that can also act on the answer.
 func (a Account) PassEntry(c config.Config) string {
+	if s := strings.Trim(strings.TrimSpace(a.PassOverride), "/"); s != "" {
+		return s
+	}
+	return a.PassEntryIn(c, c.PassLayout)
+}
+
+// PassEntryIn is the name this account would have under a named layout, override ignored.
+func (a Account) PassEntryIn(c config.Config, l config.PassLayout) string {
+	if l == config.LayoutDomain {
+		return path(c.PassPrefix, a.Domain(), a.Address)
+	}
 	return path(c.PassPrefix, a.Address)
+}
+
+// PassCandidates is every name this account could reasonably have, best first.
+//
+// The order is the search order: an override, when set, is the only candidate — it was a decision,
+// and a decision that still gets second-guessed is not one. Otherwise the configured layout leads
+// and the other follows, so a store filed the other way is found without anything being moved.
+func (a Account) PassCandidates(c config.Config) []string {
+	if s := strings.Trim(strings.TrimSpace(a.PassOverride), "/"); s != "" {
+		return []string{s}
+	}
+	first := a.PassEntryIn(c, c.PassLayout)
+	second := a.PassEntryIn(c, c.PassLayout.Other())
+	if second == first {
+		return []string{first}
+	}
+	return []string{first, second}
 }
 
 // Maildir is where mbsync writes and NeoMutt reads.
