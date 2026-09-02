@@ -58,6 +58,32 @@ func OptionsRC(c config.Config) string {
 	// another to get back to the mailbox is one key too many for something done all day.
 	b.WriteString("unset wait_key   # only pause after a command that failed\n")
 
+	// Which headers a message actually shows.
+	//
+	// NeoMutt weeds by default, but its ignore list STARTS EMPTY — so the weeding runs and
+	// removes nothing, and a message opens on Received:, ARC-Seal:, DKIM-Signature: and a
+	// screenful of X-Gm-* before a word of what somebody wrote. That reads as a broken pager
+	// rather than as a list nobody filled in, which is why the default belongs here instead of
+	// being left for everyone to discover.
+	//
+	// Written as "hide everything, then name what is worth reading" rather than as a list of
+	// what to hide: the headers worth reading are a short, stable set, and the ones worth
+	// hiding are unbounded — every provider invents more of them, and a blocklist is out of
+	// date the first time one does.
+	//
+	// NOT a config field, deliberately. Nothing else mailforge knows depends on it, and a
+	// setting with no coupling is one this program has no business owning. It is a DEFAULT: this
+	// file is sourced before the user's settings.rc, ignore and unignore accumulate, so
+	// `unignore List-Id:` there brings one back and `ignore Reply-To:` takes one away.
+	b.WriteString("\n")
+	b.WriteString("ignore *\n")
+	b.WriteString("unignore From: To: Cc: Bcc: Reply-To: Date: Subject:\n")
+	// And in a fixed order, because without this they appear in whatever order the sending
+	// server happened to write them, which differs per message and makes the top of a mail
+	// something to read rather than something to glance at.
+	b.WriteString("unhdr_order *\n")
+	b.WriteString("hdr_order From: To: Cc: Bcc: Reply-To: Date: Subject:\n")
+
 	return b.String()
 }
 
