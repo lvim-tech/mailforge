@@ -175,6 +175,20 @@ type Config struct {
 	// An empty value means deliberately unbound, which is why an absent entry and an empty one
 	// are not the same thing and Fill distinguishes them.
 	Keys map[string]string `json:"keys"`
+	// KeepHeaders are the message headers NeoMutt shows; everything else is weeded away.
+	//
+	// NeoMutt weeds by default, but its ignore list STARTS EMPTY — the weeding runs and removes
+	// nothing, so a message opens on Received:, ARC-Seal:, DKIM-Signature: and a screenful of
+	// X-Gm-* before a word of what somebody wrote.
+	//
+	// A KEEP list rather than a hide list: the headers worth reading are a short, stable set,
+	// and the ones worth hiding are unbounded — every provider invents more, and a blocklist is
+	// out of date the first time one does.
+	//
+	// ABSENT and EMPTY are different, the same distinction Keys draws. Absent means "no opinion
+	// recorded, use the default". Empty means "weed nothing" — a deliberate choice to see every
+	// header, and one this program must not quietly overwrite with its own list.
+	KeepHeaders []string `json:"keep_headers"`
 	// ISPDB allows discovery to ask Mozilla's database about an unknown domain.
 	//
 	// It is a setting because it is a privacy decision, not a technical one: the query tells
@@ -204,6 +218,7 @@ func Default() Config {
 		NeomuttDir:  filepath.Join(home, ".config", "neomutt"),
 		MbsyncRC:    filepath.Join(home, ".mbsyncrc"),
 		PassPrefix:  "mail",
+		KeepHeaders: []string{"From:", "To:", "Cc:", "Bcc:", "Reply-To:", "Date:", "Subject:"},
 		// Flat, because every store mailforge has written so far is flat and a default that
 		// silently relocated them would be a migration nobody asked for. A domain-filed store
 		// is still found without changing this: the fallback looks in the other layout.
@@ -304,6 +319,11 @@ func (c Config) withDefaults() Config {
 	// and a typo in one field should not stop mailforge from starting.
 	if !c.PassLayout.Valid() {
 		c.PassLayout = d.PassLayout
+	}
+	// nil, not len()==0: a file saying "keep_headers": [] has asked for no weeding, and filling
+	// that from the default would override the one setting the user went out of their way to make.
+	if c.KeepHeaders == nil {
+		c.KeepHeaders = d.KeepHeaders
 	}
 	if c.CertFile == "" {
 		c.CertFile = d.CertFile

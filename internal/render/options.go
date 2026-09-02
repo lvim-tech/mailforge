@@ -62,29 +62,46 @@ func OptionsRC(c config.Config) string {
 	//
 	// NeoMutt weeds by default, but its ignore list STARTS EMPTY — so the weeding runs and
 	// removes nothing, and a message opens on Received:, ARC-Seal:, DKIM-Signature: and a
-	// screenful of X-Gm-* before a word of what somebody wrote. That reads as a broken pager
-	// rather than as a list nobody filled in, which is why the default belongs here instead of
-	// being left for everyone to discover.
+	// screenful of X-Gm-* before a word of what somebody wrote.
 	//
 	// Written as "hide everything, then name what is worth reading" rather than as a list of
 	// what to hide: the headers worth reading are a short, stable set, and the ones worth
 	// hiding are unbounded — every provider invents more of them, and a blocklist is out of
 	// date the first time one does.
 	//
-	// NOT a config field, deliberately. Nothing else mailforge knows depends on it, and a
-	// setting with no coupling is one this program has no business owning. It is a DEFAULT: this
-	// file is sourced before the user's settings.rc, ignore and unignore accumulate, so
-	// `unignore List-Id:` there brings one back and `ignore Reply-To:` takes one away.
+	// Still only a DEFAULT, like everything else in this file: it is sourced before the user's
+	// settings.rc, and ignore/unignore accumulate, so `unignore List-Id:` there brings one back.
 	b.WriteString("\n")
-	b.WriteString("ignore *\n")
-	b.WriteString("unignore From: To: Cc: Bcc: Reply-To: Date: Subject:\n")
-	// And in a fixed order, because without this they appear in whatever order the sending
-	// server happened to write them, which differs per message and makes the top of a mail
-	// something to read rather than something to glance at.
-	b.WriteString("unhdr_order *\n")
-	b.WriteString("hdr_order From: To: Cc: Bcc: Reply-To: Date: Subject:\n")
+	if keep := headerList(c.KeepHeaders); keep != "" {
+		b.WriteString("ignore *\n")
+		fmt.Fprintf(&b, "unignore %s\n", keep)
+		// And in a fixed order, because without this they appear in whatever order the sending
+		// server happened to write them, which differs per message and makes the top of a mail
+		// something to read rather than something to glance at.
+		b.WriteString("unhdr_order *\n")
+		fmt.Fprintf(&b, "hdr_order %s\n", keep)
+	} else {
+		// Said out loud, for the same reason the missing editor is: an empty list and "this
+		// program has no opinion" look identical on disk and mean different things.
+		b.WriteString("# no headers kept in mailforge — every header is shown, as NeoMutt does by default\n")
+	}
 
 	return b.String()
+}
+
+// headerList renders the keep list as one NeoMutt argument line.
+//
+// Entries are trimmed and the blank ones dropped, because this list is edited as a line of text in
+// the settings screen and a stray double space there would otherwise become an empty pattern —
+// which NeoMutt reads as a pattern matching everything, quietly undoing the `ignore *` above it.
+func headerList(keep []string) string {
+	out := make([]string, 0, len(keep))
+	for _, h := range keep {
+		if h = strings.TrimSpace(h); h != "" {
+			out = append(out, h)
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // NeomuttOptionsInclude is the line that sources it, and its block belongs among the first.

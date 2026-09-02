@@ -107,6 +107,32 @@ var settings = []setting{
 			"move — this only says which name a NEW password is written under.",
 	},
 	{
+		label: "kept headers",
+		kind:  skText,
+		get:   func(v *settingsView) string { return strings.Join(v.cfg.KeepHeaders, " ") },
+		set: func(v *settingsView, s string) error {
+			// Fields, not Split: the list is typed as a line, and Split on " " turns a double
+			// space into an empty pattern — which NeoMutt matches against everything and which
+			// would silently undo the weeding this setting exists to do.
+			f := strings.Fields(s)
+			if len(f) == 0 {
+				// Empty is allowed and MEANINGFUL: it turns weeding off. Made explicit rather
+				// than nil, so withDefaults does not read it as "absent" and fill it back in.
+				v.cfg.KeepHeaders = []string{}
+				return nil
+			}
+			for _, h := range f {
+				if !strings.HasSuffix(h, ":") {
+					return fmt.Errorf("%q needs a colon — NeoMutt matches header names as %q", h, h+":")
+				}
+			}
+			v.cfg.KeepHeaders = f
+			return nil
+		},
+		note: "the headers a message shows; everything else is hidden. Empty means hide nothing. " +
+			"[h] in the index still toggles the full set on any one message.",
+	},
+	{
 		label: "CA bundle",
 		kind:  skText,
 		get:   func(v *settingsView) string { return v.cfg.CertFile },

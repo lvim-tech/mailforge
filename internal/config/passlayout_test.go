@@ -42,3 +42,17 @@ func TestPassLayoutOtherPairsTheTwo(t *testing.T) {
 		t.Errorf("LayoutDomain.Other() = %q, want %q", got, LayoutFlat)
 	}
 }
+
+// TestAbsentAndEmptyKeepHeadersDiffer is the distinction the field exists to preserve: a config
+// with no opinion gets the default list, and one that deliberately asked for no weeding keeps that
+// answer instead of having it filled back in.
+func TestAbsentAndEmptyKeepHeadersDiffer(t *testing.T) {
+	absent := Config{}.withDefaults().KeepHeaders
+	if len(absent) == 0 {
+		t.Error("an absent keep_headers should be filled from the default, not left empty")
+	}
+	empty := Config{KeepHeaders: []string{}}.withDefaults().KeepHeaders
+	if len(empty) != 0 {
+		t.Errorf("an explicitly empty keep_headers was overwritten with %v", empty)
+	}
+}
