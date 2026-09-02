@@ -52,6 +52,7 @@ mailforge unread                # total unread, for a status bar
 mailforge unread --per-account  # one line per address
 mailforge unread --json         # one Waybar custom-module object
 mailforge unread --watch        # stream the total, printing only when it changes
+mailforge unread --watch --json # the same, as status-bar objects
 ```
 
 `apply` touches no passwords: it reads none, asks for none and writes none. It is for when the
@@ -69,6 +70,21 @@ facts: mail in INBOX is people waiting, and mail in spam is a decision a filter 
 bar so that a wrong one is visible. The `alt` field carries the state (`read`, `unread`, `error`) for
 the bar's own `format-icons`, because which glyph means "mail waiting" depends on the font installed
 and is not something this program should decide.
+
+With `--watch` the bar stops asking and starts listening: mailforge writes a line only when the
+count actually changes, so reading a message updates the bar within about two seconds instead of
+whenever the next poll happens to land. In Waybar that means no `interval` at all —
+
+```jsonc
+"exec": "mailforge unread --watch --json",
+"return-type": "json",
+"restart-interval": 5,
+```
+
+It polls rather than watching with inotify. What marks a message read is a RENAME inside `cur/` —
+NeoMutt adds the `S` flag to the filename — so watching would mean a descriptor on every maildir of
+every account, re-established whenever mbsync creates a folder. Two seconds is under the threshold
+at which a bar feels stale, and the work is a directory listing the page cache already holds.
 
 `unread` counts both halves of each maildir — everything in `new/`, plus anything in `cur/` whose
 filename lacks the `S` flag — for INBOX and the account's spam folder. A message a client has

@@ -153,17 +153,17 @@ func runApply(c config.Config) int {
 }
 
 func runUnread(c config.Config, args []string) int {
+	asJSON, watch := false, false
 	for _, a := range args {
-		if a == "--watch" {
-			return watchUnread(c)
+		switch a {
+		case "--json":
+			asJSON = true
+		case "--watch":
+			watch = true
 		}
 	}
-
-	asJSON := false
-	for _, a := range args {
-		if a == "--json" {
-			asJSON = true
-		}
+	if watch {
+		return watchUnread(c, asJSON)
 	}
 
 	reg, err := account.Load()
@@ -274,16 +274,32 @@ func printBarJSON(total int, per []inbox.Count, err error) int {
 // pass over every maildir is a quarter of a millisecond, so two seconds between passes is a
 // rounding error, and there is no dependency and no watch to lose on a directory that gets
 // replaced underneath it.
-func watchUnread(c config.Config) int {
-	last := -1
+func watchUnread(c config.Config, asJSON bool) int {
+	// A pair that cannot occur, so the first look always counts as a change and prints. Starting
+	// at 0/0 would leave a bar blank until the first mail arrived — on a machine with nothing
+	// unread, that is forever.
+	lastIn, lastSpam := -1, -1
 	for {
 		reg, err := account.Load()
 		if err == nil {
-			if total, _ := inbox.Unread(c, reg.Accounts); total != last {
-				last = total
-				fmt.Println(total)
+			total, per := inbox.Unread(c, reg.Accounts)
+			// BOTH numbers, because either can move on its own: a message read in INBOX and a
+			// message caught by a filter in the same interval cancel out in the total, and a
+			// bar comparing only that would show the old split until something else changed.
+			if in, spam := inbox.Split(per); in != lastIn || spam != lastSpam {
+				lastIn, lastSpam = in, spam
+				if asJSON {
+					printBarJSON(total, per, nil)
+				} else {
+					fmt.Println(total)
+				}
 			}
 		}
+		// Polling, not inotify. What marks a message read is a RENAME inside cur/ — NeoMutt
+		// adds the S flag to the filename — so watching would mean a descriptor on every
+		// maildir of every account, re-established whenever mbsync creates a folder. Two
+		// seconds is under the threshold at which a status bar feels stale, and the work is a
+		// directory listing that the page cache has already got.
 		time.Sleep(2 * time.Second)
 	}
 }
