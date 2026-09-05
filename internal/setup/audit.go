@@ -485,6 +485,7 @@ func Fix(c config.Config, reg *account.Registry) Plan {
 		})
 	}
 	ApplyIndex(c, reg, &p)
+	ApplyConfig(c, &p)
 	return p
 }
 

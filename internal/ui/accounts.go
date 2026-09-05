@@ -389,6 +389,7 @@ func (v *accountsView) applyIndexOnly() tea.Cmd {
 	return func() tea.Msg {
 		var p setup.Plan
 		setup.ApplyIndex(cfg, &reg, &p)
+		setup.ApplyConfig(cfg, &p)
 		return applied(p)
 	}
 }

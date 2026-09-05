@@ -134,10 +134,8 @@ func runApply(c config.Config) int {
 		return 0
 	}
 	code := 0
-	for _, a := range reg.Accounts {
-		fmt.Println(a.Address)
-		// nil secret: this is a re-render, not a password change.
-		for _, s := range setup.ApplyAccount(c, &reg, a, nil).Steps {
+	report := func(steps []setup.Step) {
+		for _, s := range steps {
 			switch {
 			case s.Err != nil:
 				fmt.Printf("  FAIL  %s: %v\n", s.What, s.Err)
@@ -149,6 +147,23 @@ func runApply(c config.Config) int {
 			}
 		}
 	}
+
+	for _, a := range reg.Accounts {
+		fmt.Println(a.Address)
+		// nil secret: this is a re-render, not a password change.
+		report(setup.ApplyAccount(c, &reg, a, nil).Steps)
+	}
+
+	// ONCE, after the loop. This half is a function of the config, not of an account, and it
+	// used to run inside the loop: the file writes only said "already up to date" five times
+	// over, but ApplyTimer restarts the unit, and five restarts in two seconds is past what
+	// systemd allows — the last one left the timer FAILED. An apply that exists to schedule
+	// mail fetching ended by unscheduling it.
+	fmt.Println("configuration")
+	var p setup.Plan
+	setup.ApplyConfig(c, &p)
+	report(p.Steps)
+
 	return code
 }
 

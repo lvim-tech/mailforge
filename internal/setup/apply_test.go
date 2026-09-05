@@ -203,7 +203,11 @@ func TestAuditSeesAHandEditedOwnedFile(t *testing.T) {
 	c := scratch(t)
 	var reg account.Registry
 	a := testAccount("a@example.com")
-	if p := ApplyAccount(c, &reg, a, nil); p.Failed() {
+	// AndConfig, because the audit checks the config-level files too and they are no longer
+	// written by ApplyAccount: applying one account is what the interface does, and it pairs
+	// the two. `mailforge apply` pairs them differently — the loop, then the config once —
+	// which is the whole reason they were separated.
+	if p := ApplyAccountAndConfig(c, &reg, a, nil); p.Failed() {
 		t.Fatal("apply failed")
 	}
 

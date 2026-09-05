@@ -293,15 +293,43 @@ func ApplyIndex(c config.Config, r *account.Registry, p *Plan) {
 		return "written", config.WriteAtomic(idx, []byte(body), 0o600)
 	})
 
-	ApplyKeys(c, p)
-	ApplyOptions(c, p)
-	ApplyTimer(c, p)
-
 	rc := filepath.Join(c.NeomuttDir, "neomuttrc")
 	run("point "+rc+" at it", func() (string, error) {
 		res, err := edit.Upsert(rc, "", render.NeomuttInclude(c), false)
 		return res.Note, err
 	})
+}
+
+/*
+ApplyConfig writes what depends on the CONFIG and on nothing else: the keys, the options and the
+mailcap beside them, and the fetch timer.
+
+It used to sit inside ApplyIndex, and therefore ran once per account, because ApplyIndex runs once
+per ApplyAccount and `mailforge apply` calls ApplyAccount for each. The file writes did not care —
+they report "already up to date" on the second pass and every one after. The timer did.
+
+ApplyTimer restarts the unit rather than asking whether it is running, deliberately: a monotonic
+timer whose service failed badly enough elapses with nothing left to schedule and goes on reporting
+"active" while it will never fire again — twenty days of that were how the restart got there. But a
+restart per account is five restarts in two seconds on a machine with five accounts, and systemd
+stops at five in ten: the last one hit the start limit and left the timer FAILED. An apply that
+schedules mail fetching ended by unscheduling it, and said so in one line among forty.
+
+So it is called once, by whoever is applying — after the loop in `mailforge apply`, and beside the
+single account the interface is working on.
+*/
+func ApplyConfig(c config.Config, p *Plan) {
+	ApplyKeys(c, p)
+	ApplyOptions(c, p)
+	ApplyTimer(c, p)
+}
+
+// ApplyAccountAndConfig is the pair, for the callers that work on ONE account and therefore have no
+// loop to hoist the config half out of. `mailforge apply` does not use it: it has a loop.
+func ApplyAccountAndConfig(c config.Config, r *account.Registry, a account.Account, secret *sys.Secret) Plan {
+	p := ApplyAccount(c, r, a, secret)
+	ApplyConfig(c, &p)
+	return p
 }
 
 // ApplyKeys writes keys.rc and points neomuttrc at it.

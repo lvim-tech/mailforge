@@ -493,7 +493,9 @@ func (v *accountsView) applyStep() tea.Cmd {
 		if sec != nil {
 			defer sec.Close()
 		}
-		return applied(setup.ApplyAccount(cfg, &reg, draft, sec))
+		// AndConfig: one account, so there is no loop to hoist the config half out of,
+		// and a new account needs the keys, the options and the timer in place.
+		return applied(setup.ApplyAccountAndConfig(cfg, &reg, draft, sec))
 	}
 }
 
