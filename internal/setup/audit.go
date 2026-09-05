@@ -1,8 +1,10 @@
 package setup
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -124,6 +126,10 @@ func auditKeys(r *Report, c config.Config) {
 func auditOptions(r *Report, c config.Config) {
 	of := filepath.Join(c.NeomuttDir, "mailforge", "options.rc")
 	checkOwned(r, "options", of, render.OptionsRC(c))
+
+	mf := filepath.Join(c.NeomuttDir, "mailforge", "mailcap")
+	checkOwned(r, "options", mf, render.MailcapRC(c))
+	auditHTMLViewer(r, c)
 
 	rc := filepath.Join(c.NeomuttDir, "neomuttrc")
 	switch has, err := edit.Has(rc, "options"); {
@@ -480,4 +486,106 @@ func Fix(c config.Config, reg *account.Registry) Plan {
 	}
 	ApplyIndex(c, reg, &p)
 	return p
+}
+
+/*
+auditHTMLViewer reports the three ways HTML mail ends up unreadable without saying so.
+
+All three are the same fault: something is in place, nothing complains, and every HTML message
+opens as an empty body. It went unnoticed here for months.
+*/
+func auditHTMLViewer(r *Report, c config.Config) {
+	program, _ := c.HTMLViewerCommand()
+	choice := strings.TrimSpace(c.HTMLViewer)
+	if choice == "" {
+		choice = config.HTMLViewerAuto
+	}
+
+	// Asked for by name and not installed. Not silently replaced with the other one: naming a
+	// program is a decision, and a program that quietly runs something else is worse than one
+	// that says it cannot.
+	if program == "" && choice != config.HTMLViewerNone {
+		if choice == config.HTMLViewerAuto {
+			r.Findings = append(r.Findings, Finding{Warn, "options",
+				"no HTML viewer is installed, so HTML mail shows as an empty message",
+				"install w3m (or lynx) and apply again, or set the HTML viewer to none " +
+					"so it is left as an attachment"})
+		} else {
+			r.Findings = append(r.Findings, Finding{Warn, "options",
+				choice + " is set as the HTML viewer but is not installed, so HTML mail " +
+					"shows as an empty message",
+				"install " + choice + ", or set the HTML viewer to auto"})
+		}
+	}
+
+	// The user's own mailcap is read FIRST, so a text/html rule there beats the managed one —
+	// which is the point of the ordering, and also the way a rule naming a program nobody has
+	// goes on winning forever. mailforge seeded exactly such a rule before 2026-09-05.
+	userMailcap := filepath.Join(c.NeomuttDir, "mailcap")
+	if rule, ok := htmlRuleIn(userMailcap); ok {
+		if prog := firstWord(rule); prog != "" {
+			if _, err := exec.LookPath(prog); err != nil {
+				r.Findings = append(r.Findings, Finding{Warn, "options",
+					"your mailcap has a text/html rule running " + prog + ", which is not " +
+						"installed — it is read before mailforge's and wins, so HTML mail " +
+						"shows as an empty message",
+					"remove that line from " + userMailcap + " and let the HTML viewer " +
+						"setting handle it"})
+			}
+		}
+	}
+
+	// A mailcap_path in the user's settings.rc is read after options.rc and undoes the pair of
+	// files, leaving the managed mailcap unreachable.
+	if hasSetting(filepath.Join(c.NeomuttDir, "settings.rc"), "mailcap_path") {
+		r.Findings = append(r.Findings, Finding{Warn, "options",
+			"your settings.rc sets mailcap_path, and is read after options.rc — mailforge's " +
+				"own mailcap is never reached",
+			"remove that line; mailforge points NeoMutt at your mailcap first and its own second"})
+	}
+}
+
+// htmlRuleIn returns the first uncommented text/html line of a mailcap file.
+func htmlRuleIn(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "text/html;") {
+			return strings.TrimSpace(line[len("text/html;"):]), true
+		}
+	}
+	return "", false
+}
+
+// hasSetting says whether a NeoMutt rc file sets a named variable, ignoring comments.
+func hasSetting(path, name string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "set ") && strings.Contains(line, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstWord is the program a mailcap command runs.
+func firstWord(cmd string) string {
+	return strings.TrimSpace(strings.SplitN(strings.TrimSpace(cmd), " ", 2)[0])
 }

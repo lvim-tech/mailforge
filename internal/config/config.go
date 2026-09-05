@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/lvim-tech/mailforge/internal/keys"
 )
@@ -104,6 +106,20 @@ type Config struct {
 	// ended in "error running $EDITOR", which names the variable rather than the fact that it
 	// was not there. A path in the config is a path on every start.
 	Editor string `json:"editor"`
+
+	// HTMLViewer is the program that turns an HTML message into text for the pager.
+	//
+	// A SETTING, and not a line seeded once into mailcap, because that is exactly how it went
+	// wrong. mailforge seeded `text/html; lynx -dump ...` on a machine without lynx, the rule
+	// named a program that was not there, and every HTML message read as an empty body — for
+	// months, because a seeded file is never revisited and no later version of this program
+	// could correct it. Here it is re-resolved on every apply.
+	//
+	// "" or HTMLViewerAuto picks the best of what is installed; HTMLViewerW3M and
+	// HTMLViewerLynx name one outright, and are NOT quietly replaced when the named program is
+	// missing — a request is a decision, and the doctor reports it instead.
+	// HTMLViewerNone writes no rule and no auto_view at all.
+	HTMLViewer string `json:"html_viewer"`
 
 	// SidebarCounts turns on NeoMutt's mail_check_stats.
 	//
@@ -211,6 +227,86 @@ type Config struct {
 // and caches have different lifetimes and different backup answers: the first is worth keeping in
 // version control, the second is large and re-fetchable, the third is disposable. A tree that
 // mixes them makes every one of those questions harder to answer.
+// The values HTMLViewer takes.
+const (
+	HTMLViewerAuto = "auto"
+	HTMLViewerW3M  = "w3m"
+	HTMLViewerLynx = "lynx"
+	HTMLViewerNone = "none"
+)
+
+/*
+HTMLViewerCommand returns the mailcap command line for the configured viewer, and the program it
+runs. Both are empty when there is nothing to run.
+
+w3m comes before lynx in auto, on two grounds. Tables: w3m draws them with rules and keeps the
+columns, lynx flattens them into a run of lines, and a mail client's commonest HTML is an invoice
+or a confirmation. Character sets: w3m reads UTF-8 without being told, while lynx wants
+-display_charset and -assume_charset to keep Cyrillic and Greek intact — and the rule mailforge
+used to seed passed neither.
+
+Nothing is returned when the chosen program is absent. A mailcap rule naming a missing program is
+worse than no rule: NeoMutt finds a handler, runs it, gets nothing, and shows an empty message.
+*/
+func (c Config) HTMLViewerCommand() (program, command string) {
+	choice := strings.TrimSpace(c.HTMLViewer)
+	if choice == "" {
+		choice = HTMLViewerAuto
+	}
+
+	switch choice {
+	case HTMLViewerNone:
+		return "", ""
+	case HTMLViewerAuto:
+		for _, p := range []string{HTMLViewerW3M, HTMLViewerLynx} {
+			if _, err := exec.LookPath(p); err == nil {
+				return p, htmlViewerCommands[p]
+			}
+		}
+		return "", ""
+	default:
+		cmd, known := htmlViewerCommands[choice]
+		if !known {
+			return "", ""
+		}
+		// Named outright: reported by the doctor if it is missing, not swapped for the other.
+		if _, err := exec.LookPath(choice); err != nil {
+			return "", ""
+		}
+		return choice, cmd
+	}
+}
+
+// HTMLViewerResolved says what auto came to, for the Settings tab to show. "auto" on its own hides
+// the one thing worth knowing — which program is actually going to run, or that none is.
+func (c Config) HTMLViewerResolved() string {
+	program, _ := c.HTMLViewerCommand()
+	choice := strings.TrimSpace(c.HTMLViewer)
+	if choice == "" {
+		choice = HTMLViewerAuto
+	}
+	switch {
+	case choice == HTMLViewerNone:
+		return "none — HTML mail is left as an attachment"
+	case program == "" && choice == HTMLViewerAuto:
+		return "auto — neither w3m nor lynx is installed, so HTML mail cannot be shown"
+	case program == "":
+		return choice + " — not installed, so HTML mail cannot be shown"
+	case choice == HTMLViewerAuto:
+		return "auto (" + program + ")"
+	default:
+		return program
+	}
+}
+
+var htmlViewerCommands = map[string]string{
+	// display_link_number puts the addresses under the text: without it a link renders as its
+	// own words and the address it points at is gone, which in mail is the half that matters.
+	HTMLViewerW3M: "w3m -dump -T text/html -o display_link_number=1 -cols 100 %s",
+	// The two charset flags are the ones the old seeded rule left out.
+	HTMLViewerLynx: "lynx -dump -width=100 -display_charset=utf-8 -assume_charset=utf-8 %s",
+}
+
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
@@ -226,6 +322,7 @@ func Default() Config {
 		CertFile:   "/etc/ssl/ca-bundle.pem",
 		RealName:   "",
 		Editor:     "vim",
+		HTMLViewer: HTMLViewerAuto,
 		// On, and every minute. The cost is a stat of each maildir on a timer — cheap, because
 		// mbsync fetches into local directories and NeoMutt never asks a server for this.
 		SidebarCounts:      true,

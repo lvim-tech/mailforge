@@ -112,7 +112,7 @@ func Seeds(c config.Config) []Seed {
 		{"settings.rc", seedSettings(c), sourced},
 		{"colors.rc", carryColors(LiveTheme(c.NeomuttDir), ""), sourced},
 		{"bindings.rc", seedBindings(), sourced},
-		{"mailcap", seedMailcap(), "settings.rc points mailcap_path at it, and without it an " +
+		{"mailcap", seedMailcap(), "mailforge/options.rc points mailcap_path at it, and without it an " +
 			"attachment cannot be opened"},
 	}
 }
@@ -169,7 +169,11 @@ func seedSettings(c config.Config) string {
 	b.WriteString("set message_cachedir = \"" + filepath.Join(cacheDir(), "bodies") + "\"\n\n")
 	b.WriteString(`set sort           = threads
 set sort_aux       = reverse-last-date-received
-set mailcap_path   = ~/.config/neomutt/mailcap
+
+# mailcap_path is NOT set here. mailforge sets it in mailforge/options.rc, to a list
+# naming your mailcap first and its own second — mailcap takes the first match, so
+# what you write in yours still wins. A set mailcap_path line here would be read
+# afterwards and would undo that; the doctor says so if one appears.
 
 # Mail is fetched by mbsync into the maildirs, so NeoMutt never speaks IMAP itself.
 unset imap_passive
@@ -181,14 +185,24 @@ set sidebar_format = "%D%* %?N?%N/?%S"
 	return b.String()
 }
 
-// seedMailcap is the minimum that stops NeoMutt complaining and makes HTML mail readable.
+// seedMailcap is what to do with attachments that are not HTML.
+//
+// text/html is deliberately NOT here any more. It used to be, naming lynx, and that is the whole
+// argument for the change: a seeded file is written once and never revisited, so on a machine
+// without lynx the rule named a program that was not there and every HTML message read as an empty
+// body — for months, with no later version of this program able to correct it. It is a setting now
+// (Settings → HTML viewer), rendered into mailforge/mailcap on every apply, where it can be got
+// right the second time.
 //
 // `copiousoutput` is what lets the text version appear inline rather than launching something;
 // without it an HTML message opens a browser, which on a mail client used over ssh is a surprise.
 func seedMailcap() string {
 	return `# How to view attachments. mailforge seeded this once and never touches it again.
+#
+# text/html is handled in mailforge/mailcap, from the Settings tab. A rule for it HERE
+# wins over that one — mailcap takes the first match — which is useful if you want your
+# own, and a surprise if you have forgotten it is here.
 
-text/html; lynx -dump -width=100 %s; nametemplate=%s.html; copiousoutput
 text/plain; cat %s; copiousoutput
 image/*; xdg-open %s
 application/pdf; xdg-open %s

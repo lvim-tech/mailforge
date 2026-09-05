@@ -166,6 +166,34 @@ var settings = []setting{
 			"NeoMutt, which falls back to $VISUAL, $EDITOR, then vi.",
 	},
 	{
+		label: "HTML viewer",
+		kind:  skText,
+		get:   func(v *settingsView) string { return v.cfg.HTMLViewer },
+		// What it CAME TO, not what is stored. "auto" on its own hides the one thing worth
+		// knowing — which program will actually run, or that none will and HTML mail cannot
+		// be shown at all. That was the whole failure this setting exists to end: a rule
+		// naming a program nobody had, looking exactly like a rule that worked.
+		show: func(v *settingsView) string { return v.cfg.HTMLViewerResolved() },
+		set: func(v *settingsView, s string) error {
+			choice := strings.ToLower(strings.TrimSpace(s))
+			switch choice {
+			case "":
+				choice = config.HTMLViewerAuto
+			case config.HTMLViewerAuto, config.HTMLViewerW3M,
+				config.HTMLViewerLynx, config.HTMLViewerNone:
+			default:
+				return fmt.Errorf("use auto, w3m, lynx or none — not %q", s)
+			}
+			v.cfg.HTMLViewer = choice
+			return nil
+		},
+		note: "what turns an HTML message into text for the pager. auto takes w3m if it is " +
+			"installed, then lynx: w3m keeps tables as tables and reads UTF-8 without being " +
+			"told, both of which matter more in mail than anywhere else. Naming one outright " +
+			"is a decision — it is not swapped for the other when it is missing, the doctor " +
+			"reports it. none leaves HTML mail as an attachment, opened with v.",
+	},
+	{
 		label: "sidebar counts",
 		kind:  skBool,
 		get:   func(v *settingsView) string { return yesno(v.cfg.SidebarCounts) },

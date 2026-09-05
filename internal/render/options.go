@@ -86,7 +86,62 @@ func OptionsRC(c config.Config) string {
 		b.WriteString("# no headers kept in mailforge — every header is shown, as NeoMutt does by default\n")
 	}
 
+	// Showing an HTML message in the pager.
+	//
+	// Two halves, and mailforge used to seed one of them. The mailcap rule says HOW to turn the
+	// part into text; `auto_view` says to DO it for the body rather than leave the part to be
+	// opened by hand with `v`. Without the second the first is never reached, so a mailbox full
+	// of HTML reads as a mailbox full of empty messages — which is what happened here, for
+	// months, with a mailcap rule sitting in place the whole time.
+	//
+	// alternative_order is written out although it matches NeoMutt's own default: it is the half
+	// of this that is easy to lose, and a message carrying both parts should be read as the text
+	// one.
+	b.WriteString("\n")
+	if program, _ := c.HTMLViewerCommand(); program != "" {
+		fmt.Fprintf(&b, "# HTML mail is turned into text by %s — see mailforge/mailcap\n", program)
+		// Both files, the user's first, because mailcap takes the FIRST match.
+		b.WriteString(NeomuttMailcapPath(c))
+		b.WriteString("auto_view text/html\n")
+		b.WriteString("alternative_order text/plain text/enriched text/html\n")
+	} else {
+		// Said out loud rather than left silent, for the same reason as the missing editor:
+		// nothing here and "this program has no opinion here" look identical on disk.
+		b.WriteString("# no HTML viewer available — HTML mail stays an attachment, opened with `v`\n")
+		b.WriteString("# install w3m (or lynx), then apply again\n")
+	}
+
 	return b.String()
+}
+
+/*
+MailcapRC is mailforge's own mailcap, and it is a SECOND file rather than a line in the user's.
+
+mailcap_path takes a list and the FIRST match wins, which is the opposite of how NeoMutt reads its
+source lines — so this file goes AFTER the user's, and anything they write there still beats it.
+The effect is the one options.rc has for settings: what mailforge manages is rewritten on every
+apply, and what the user writes by hand wins.
+
+Empty when no viewer resolves. A mailcap rule naming a program that is not installed is worse than
+no rule at all: NeoMutt finds a handler, runs it, gets nothing back, and shows an empty message
+with no indication that anything went wrong.
+*/
+func MailcapRC(c config.Config) string {
+	program, command := c.HTMLViewerCommand()
+	if program == "" {
+		return HeaderFromConfig +
+			"#\n# No HTML viewer is available or configured, so there is no rule here.\n" +
+			"# Install w3m (or lynx) and apply again, or set one in the Settings tab.\n"
+	}
+	return HeaderFromConfig +
+		"#\n# Read AFTER your own mailcap: the first matching line wins, so anything you\n" +
+		"# write there overrides this.\n\n" +
+		"text/html; " + command + "; nametemplate=%s.html; copiousoutput\n"
+}
+
+// NeomuttMailcapPath points NeoMutt at both files, the user's first.
+func NeomuttMailcapPath(c config.Config) string {
+	return fmt.Sprintf("set mailcap_path = %s/mailcap:%s/mailforge/mailcap\n", c.NeomuttDir, c.NeomuttDir)
 }
 
 // headerList renders the keep list as one NeoMutt argument line.

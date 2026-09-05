@@ -357,6 +357,21 @@ func ApplyOptions(c config.Config, p *Plan) {
 		return "written", config.WriteAtomic(of, []byte(body), 0o600)
 	})
 
+	// mailforge's own mailcap, beside options.rc and written on the same run: the auto_view
+	// line above is worth nothing without a rule for it to reach, and a version of this program
+	// that wrote one and not the other would be the bug it exists to fix.
+	mf := filepath.Join(c.NeomuttDir, "mailforge", "mailcap")
+	Write(p, "write "+mf, func() (string, error) {
+		if err := os.MkdirAll(filepath.Dir(mf), 0o700); err != nil {
+			return "", err
+		}
+		body := render.MailcapRC(c)
+		if same, err := unchanged(mf, body); err == nil && same {
+			return "already up to date", nil
+		}
+		return "written", config.WriteAtomic(mf, []byte(body), 0o600)
+	})
+
 	rc := filepath.Join(c.NeomuttDir, "neomuttrc")
 	Write(p, "point "+rc+" at the options", func() (string, error) {
 		// TOP, so the user's own settings.rc is read afterwards and wins.
