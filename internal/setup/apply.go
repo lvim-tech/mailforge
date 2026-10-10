@@ -10,6 +10,7 @@ import (
 	"github.com/lvim-tech/mailforge/internal/config"
 	"github.com/lvim-tech/mailforge/internal/edit"
 	"github.com/lvim-tech/mailforge/internal/render"
+	"github.com/lvim-tech/mailforge/internal/sidebar"
 	"github.com/lvim-tech/mailforge/internal/store"
 	"github.com/lvim-tech/mailforge/internal/sys"
 )
@@ -292,6 +293,61 @@ func ApplyIndex(c config.Config, r *account.Registry, p *Plan) {
 		}
 		return "written", config.WriteAtomic(idx, []byte(body), 0o600)
 	})
+
+	// The folded sidebar's own file. Written HERE because it is a function of the whole registry
+	// — the same reason accounts.rc is — and because adding or removing an account has to show
+	// up in it, which is a thing no keypress will do on its own.
+	//
+	// Taken away again when the setting is off. A generated file that nothing sources is a riddle
+	// for whoever finds it next, and the state it was rendered from stays on disk, so turning the
+	// setting back on brings the same folds back.
+	sb := render.SidebarPath(c)
+	if c.SidebarCollapse {
+		run("write "+sb, func() (string, error) {
+			if err := os.MkdirAll(filepath.Dir(sb), 0o700); err != nil {
+				return "", err
+			}
+			st := sidebar.Load()
+			known := make(map[string]bool, len(r.Accounts))
+			for _, a := range r.Accounts {
+				known[a.Address] = true
+			}
+			st.Prune(known)
+			if err := st.Save(); err != nil {
+				return "", err
+			}
+			body := render.SidebarRC(c, r.Accounts, st.OpenSet(), st.Current)
+			if same, err := unchanged(sb, body); err == nil && same {
+				return "already up to date", nil
+			}
+			return "written", config.WriteAtomic(sb, []byte(body), 0o600)
+		})
+		// The INBOX hook's file, written on the same run for the same reason mailcap is written
+		// beside options.rc: without it the hook in accounts.rc sources a file that is not there,
+		// which is an error banner at every start, and Enter cannot tell an account's row from a
+		// folder under it.
+		ih := render.InboxHookPath(c)
+		run("write "+ih, func() (string, error) {
+			body := render.InboxHookRC(c)
+			if same, err := unchanged(ih, body); err == nil && same {
+				return "already up to date", nil
+			}
+			return "written", config.WriteAtomic(ih, []byte(body), 0o600)
+		})
+	} else {
+		for _, gone := range []string{sb, render.InboxHookPath(c)} {
+			p := gone
+			run("remove "+p, func() (string, error) {
+				if err := os.Remove(p); err != nil {
+					if os.IsNotExist(err) {
+						return "was not there", nil
+					}
+					return "", err
+				}
+				return "deleted", nil
+			})
+		}
+	}
 
 	rc := filepath.Join(c.NeomuttDir, "neomuttrc")
 	run("point "+rc+" at it", func() (string, error) {

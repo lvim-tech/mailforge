@@ -23,7 +23,9 @@ import (
 	"github.com/lvim-tech/mailforge/internal/account"
 	"github.com/lvim-tech/mailforge/internal/config"
 	"github.com/lvim-tech/mailforge/internal/inbox"
+	"github.com/lvim-tech/mailforge/internal/render"
 	"github.com/lvim-tech/mailforge/internal/setup"
+	"github.com/lvim-tech/mailforge/internal/sidebar"
 	"github.com/lvim-tech/mailforge/internal/sys"
 	"github.com/lvim-tech/mailforge/internal/ui"
 )
@@ -83,6 +85,15 @@ func main() {
 	// "and then tell the bar" half cannot end up on only one of the two paths.
 	if len(os.Args) > 1 && os.Args[1] == "fetch" {
 		os.Exit(setup.Fetch(c))
+	}
+
+	// `mailforge sidebar` — the folded sidebar's two halves, both called from inside NeoMutt.
+	//
+	// A subcommand for the same reason `unread` is one: the answer depends on the registry. Which
+	// accounts exist, in what order, and where their maildirs are is what the file it writes is
+	// made of, and anything outside this binary would be carrying a second copy of all three.
+	if len(os.Args) > 1 && os.Args[1] == "sidebar" {
+		os.Exit(runSidebar(c, os.Args[2:]))
 	}
 
 	// First run: a machine with no config has no directories, no neomuttrc and nothing for the
@@ -317,4 +328,107 @@ func watchUnread(c config.Config, asJSON bool) int {
 		// directory listing that the page cache has already got.
 		time.Sleep(2 * time.Second)
 	}
+}
+
+/*
+runSidebar folds accounts open and shut, and records which one is being read.
+
+	mailforge sidebar current <address>   a folder-hook, on every change of folder
+	mailforge sidebar inbox               a second hook, when the folder is an INBOX
+	mailforge sidebar toggle [address]    the Enter macro, on a keypress
+	mailforge sidebar render              put the file back the way the state says
+
+SILENT ON STDOUT, all three. `current` is run from a backtick inside muttrc, so anything printed
+would be parsed as the value of a NeoMutt variable; `toggle` is run from <shell-escape>, which puts
+what it prints on the screen the user is reading mail on.
+
+`current` swallows its errors as well, and that is the one place here worth arguing about. Its
+failure mode is that Enter does not know which account to fold — annoying, and fixable by opening a
+folder again. Its alternative is a line of diagnostics across the pager every time the folder
+changes, from a program the user did not run. The doctor is where a broken state directory gets
+reported, not here.
+*/
+func runSidebar(c config.Config, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: mailforge sidebar current <address> | inbox | toggle [address] | render")
+		return 2
+	}
+
+	switch args[0] {
+	case "current":
+		if len(args) < 2 {
+			return 2
+		}
+		_ = sidebar.SetCurrent(args[1])
+		return 0
+
+	case "inbox":
+		_ = sidebar.SetCurrentIsInbox()
+		return 0
+
+	case "toggle":
+		st := sidebar.Load()
+		addr := st.Current
+		named := len(args) > 1
+		if named {
+			addr = args[1]
+		}
+		if addr == "" {
+			fmt.Fprintln(os.Stderr, "mailforge:", sidebar.ErrNoAccount)
+			return 1
+		}
+		// Only an account's own row folds. The key opened the highlighted row before getting
+		// here, so a plain folder under an unfolded account would otherwise fold the account
+		// shut and hide the folder that was just opened — Enter would refuse to let you in.
+		//
+		// An address given by hand folds regardless: that is somebody typing the command, not
+		// the key, and they have said which account they mean.
+		if named || st.CurrentIsInbox {
+			st.Toggle(addr)
+		}
+		if err := writeSidebar(c, &st); err != nil {
+			fmt.Fprintln(os.Stderr, "mailforge:", err)
+			return 1
+		}
+		return 0
+
+	case "render":
+		st := sidebar.Load()
+		if err := writeSidebar(c, &st); err != nil {
+			fmt.Fprintln(os.Stderr, "mailforge:", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintln(os.Stderr, "mailforge: no such sidebar command:", args[0])
+	return 2
+}
+
+// writeSidebar renders the file and saves the state that produced it, in that order.
+//
+// The file first, because it is the half NeoMutt reads: a state file saying an account is folded
+// open while the sidebar shows it shut is a disagreement the next keypress corrects, and the
+// reverse — a sidebar that cannot be folded back because the state was never written — is not.
+func writeSidebar(c config.Config, st *sidebar.State) error {
+	reg, err := account.Load()
+	if err != nil {
+		return err
+	}
+	known := make(map[string]bool, len(reg.Accounts))
+	for _, a := range reg.Accounts {
+		known[a.Address] = true
+	}
+	st.Prune(known)
+
+	p := render.SidebarPath(c)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	body := render.SidebarRC(c, reg.Accounts, st.OpenSet(), st.Current)
+	if err := config.WriteAtomic(p, []byte(body), 0o600); err != nil {
+		return err
+	}
+	return st.Save()
 }

@@ -10,6 +10,7 @@ package render
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -90,6 +91,21 @@ func AccountRC(c config.Config, a account.Account) string {
 	// head -1: a pass entry may carry metadata under the password, and NeoMutt would take the
 	// whole output as the passphrase. One line is the password by pass's own convention.
 	set("smtp_authenticators", quote("plain:login"))
+
+	// WHICH ACCOUNT IS BEING READ, written down for the fold key and for nothing else.
+	//
+	// The folder-hook sources this file on every change of folder, and NeoMutt runs a backtick
+	// each time it parses the line — so this command runs then, which is the only moment
+	// anything outside NeoMutt can learn which account is open. Enter's macro is ONE fixed
+	// string shared by every account: without this it would have no way to name the account it
+	// is being asked to fold.
+	//
+	// The value is thrown away. A my_ variable is simply the only place a muttrc can put the
+	// output of a command it runs for the effect, and this command prints nothing.
+	if c.SidebarCollapse {
+		b.WriteString("\n")
+		set("my_mailforge_sidebar", "`mailforge sidebar current "+shellQuote(a.Address)+"`")
+	}
 	return b.String()
 }
 
@@ -101,6 +117,15 @@ func AccountsRC(c config.Config, accounts []account.Account) string {
 	sorted := append([]account.Account(nil), accounts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
 
+	// Folded, the mailbox list is not in this file at all: it changes on a keypress, and this
+	// file is rewritten only by an apply. Two owners for one list would mean the next apply
+	// quietly unfolding whatever the user had folded open.
+	if c.SidebarCollapse {
+		b.WriteString("\n# The sidebar is folded, so the mailbox list lives in its own file:\n")
+		b.WriteString("# it is rewritten on every fold, and this one is not.\n")
+		fmt.Fprintf(&b, "source %s\n", SidebarPath(c))
+	}
+
 	for _, a := range sorted {
 		b.WriteString("\n")
 		// ABSOLUTE paths, not the "=" shorthand.
@@ -109,14 +134,28 @@ func AccountsRC(c config.Config, accounts []account.Account) string {
 		// still the default — the account rc that sets it is sourced afterwards. So every
 		// mailbox registered with "=" pointed into ~/Mail, and the sidebar came up empty
 		// while the maildirs sat elsewhere, correct and unreferenced.
-		dir := a.Maildir(c)
-		fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(a.LabelOrDefault()), quote(dir+"/INBOX"))
-		if boxes := mailboxLine(c, a); boxes != "" {
-			b.WriteString(boxes + "\n")
+		if !c.SidebarCollapse {
+			dir := a.Maildir(c)
+			fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(a.LabelOrDefault()), quote(dir+"/INBOX"))
+			if boxes := mailboxLine(c, a); boxes != "" {
+				b.WriteString(boxes + "\n")
+			}
 		}
 		// The pattern is quoted: unquoted, an address containing a space would be read as a
 		// pattern and a command rather than as one pattern.
 		fmt.Fprintf(&b, "folder-hook %s source %s\n", quote(a.Address+"/*"), a.RCFile(c))
+	}
+
+	// AFTER every per-account hook, and the order is the whole mechanism.
+	//
+	// Both hooks match when an INBOX is opened, and NeoMutt runs them in the order they were
+	// defined. The account's own hook assumes a plain folder; this one, running last, corrects
+	// that to "an account's own row". Defined before them it would be overwritten by the very
+	// hook it is meant to refine, and Enter would never fold anything.
+	if c.SidebarCollapse {
+		b.WriteString("\n# Last, so it has the final say when an INBOX is opened: it is what lets\n")
+		b.WriteString("# Enter tell an account's own row from a folder underneath it.\n")
+		fmt.Fprintf(&b, "folder-hook %s source %s\n", quote("/INBOX$"), InboxHookPath(c))
 	}
 
 	// Sourced last so its identity is the one in force at startup. A folder-hook fires on the
@@ -268,4 +307,161 @@ func quote(s string) string {
 // neither is this program's own text.
 func shellQuote(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
+}
+
+// SidebarPath is the generated sidebar file. One definition, because three packages need it: render
+// writes it, apply puts it down and takes it away, and audit checks it is there.
+func SidebarPath(c config.Config) string {
+	return filepath.Join(c.NeomuttDir, "mailforge", "sidebar.rc")
+}
+
+/*
+SidebarRC is the folded sidebar: one line per account, and the folders of the accounts that are
+open.
+
+It is a file of its own, and the only generated file rewritten OUTSIDE an apply — `mailforge
+sidebar toggle` writes it on a keypress and NeoMutt sources it again, which is what makes folding
+feel immediate. That is also why the whole list is rewritten rather than the one account that
+changed: NeoMutt has no way to add or drop a single mailbox, only `unmailboxes *` and a fresh list,
+so a partial update is not a smaller version of this — it is a different sidebar.
+
+Why a count per account and not per folder: twelve accounts of six folders is eighty-four lines in
+a thirty-two column strip, which is a list nobody reads. Folded, the account's own line carries %N
+from sidebar_format, so the number that matters stays visible while the rest goes away.
+
+What it CANNOT do is add up: the folded line counts that account's INBOX and nothing else, because
+NeoMutt computes per mailbox and has no notion of a group. New mail arrives in INBOX, so the number
+is right where it is looked at — but it is not a total, and Sent or Archive moving under a fold take
+their counts with them.
+*/
+func SidebarRC(c config.Config, accounts []account.Account, expanded map[string]bool, highlight string) string {
+	var b strings.Builder
+	b.WriteString(Header)
+	b.WriteString("# Rewritten again, outside any apply, by `mailforge sidebar toggle`.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Which accounts are folded open is remembered in " + config.StatePath() + ".\n")
+	b.WriteString("\n")
+
+	// EVERY mailbox goes first, so what is left is exactly this file and not this file plus
+	// whatever the last one registered. Sourced at startup it clears nothing, which is why it is
+	// safe in both roles.
+	b.WriteString("unmailboxes *\n")
+
+	sorted := append([]account.Account(nil), accounts...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
+
+	// row counts the sidebar lines as they are written, because the push at the bottom is a
+	// number of steps down a list that only this loop knows the shape of: an account's row sits
+	// after the folders of every unfolded account above it.
+	row, want := 0, 0
+	for _, a := range sorted {
+		dir := a.Maildir(c)
+		row++
+		if a.Address == highlight {
+			want = row
+		}
+		fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(a.LabelOrDefault()), quote(dir+"/INBOX"))
+		if !expanded[a.Address] {
+			continue
+		}
+		if boxes := mailboxLine(c, a); boxes != "" {
+			b.WriteString(boxes + "\n")
+			row += strings.Count(boxes, "\" \"") + 1
+		}
+	}
+
+	b.WriteString(sidebarHighlight(want))
+	return b.String()
+}
+
+/*
+sidebarHighlight walks the highlight back to the row the fold was pressed on.
+
+Registering mailboxes SCROLLS the sidebar so the open mailbox is the first visible row. Measured in
+a real client, not inferred: pressing Enter on the ninth row left that row at the top with the eight
+above it off screen and empty space below — and re-sourcing an IDENTICAL list does the same, so this
+is the act of registering and not anything about what changed.
+
+NeoMutt offers no way to set the scroll, so the position is rebuilt from the one anchor it does
+offer: <sidebar-first> goes to the top of the list, and one <sidebar-next> per row walks back down.
+A push rather than a key sequence in the macro, because the number of steps is not a constant — it
+depends on which accounts are unfolded above this one, which is exactly what the file being written
+knows and a fixed macro cannot.
+
+Zero rows means no account to go back to — a first run, or a state naming an account that is gone —
+and then nothing is pushed, because <sidebar-first> alone would be a highlight moved for no reason.
+*/
+func sidebarHighlight(row int) string {
+	if row < 1 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n# Registering mailboxes scrolls the open one to the top of the sidebar, so the\n")
+	b.WriteString("# highlight is walked back to the row this fold was pressed on.\n")
+	b.WriteString(`push "<sidebar-first>`)
+	for i := 1; i < row; i++ {
+		b.WriteString("<sidebar-next>")
+	}
+	b.WriteString("\"\n")
+	return b.String()
+}
+
+/*
+SidebarToggle is the macro Enter answers to: open the highlighted row, then fold what that turned
+out to be.
+
+<sidebar-open> FIRST, and it is the whole reason this acts on the row the user is looking at.
+Nothing outside NeoMutt can see which row is highlighted — no function reports it and no expando
+carries it — so the only way to act on that row is to open it and then ask what is now open. The
+folder-hook answers that, because opening a folder is exactly when it fires.
+
+The first version had no <sidebar-open> and folded whatever account was already open, which on a
+freshly started NeoMutt is the default account: Enter folded the top of the list however far down
+the highlight had moved. That was not a bug in the state or in the key. It was the wrong question
+asked of the only thing that could answer.
+
+Folding is per account and nothing here changes that: this toggles the one row it was pressed on and
+leaves every other fold where it was, so several accounts can be open at once and stay that way.
+
+The shell command takes NO account name. It cannot: a macro is fixed text, so the string bound to
+Enter is one string for every account and every row.
+
+<check-stats> at the end is not decoration. The mailboxes registered a moment earlier have no counts
+yet, so without it an account unfolds with nothing beside its folders until the next check comes
+round, and the fold looks like it lost the numbers.
+*/
+func SidebarToggle(c config.Config) string {
+	return "<sidebar-open><shell-escape>mailforge sidebar toggle<enter>" +
+		"<enter-command>source " + SidebarPath(c) + "<enter><check-stats>"
+}
+
+// InboxHookPath is the file the INBOX folder-hook sources.
+func InboxHookPath(c config.Config) string {
+	return filepath.Join(c.NeomuttDir, "mailforge", "inbox-hook.rc")
+}
+
+/*
+InboxHookRC is one line, and it exists because of where a backtick is allowed to run.
+
+A folder-hook whose command contains a backtick does not work for this: NeoMutt expands the backtick
+when it PARSES the hook, not when the hook fires, so the command would run once at startup and never
+again. Measured, not assumed — a hook command of `touch somefile` left the file behind after a plain
+`neomutt -Q`, with the hook never having matched anything.
+
+What does run at the right moment is a file: `folder-hook <pattern> source <file>` re-reads the file
+each time the hook fires, and a backtick inside THAT is evaluated then. The account rcs have always
+relied on this, which is also why it is trustworthy here.
+
+So: one shared file for every account, because the question it answers has no account in it. Is the
+folder that was just opened an INBOX — that is, is it an account's own row in the folded sidebar, or
+one of the folders under it?
+*/
+func InboxHookRC(c config.Config) string {
+	var b strings.Builder
+	b.WriteString(HeaderFromConfig)
+	b.WriteString("#\n")
+	b.WriteString("# Sourced by a folder-hook for every path ending in /INBOX, so that Enter can\n")
+	b.WriteString("# tell an account's own row from a folder underneath it.\n\n")
+	fmt.Fprintf(&b, "set my_mailforge_inbox = `mailforge sidebar inbox`\n")
+	return b.String()
 }

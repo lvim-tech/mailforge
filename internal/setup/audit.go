@@ -15,6 +15,7 @@ import (
 	"github.com/lvim-tech/mailforge/internal/edit"
 	"github.com/lvim-tech/mailforge/internal/keys"
 	"github.com/lvim-tech/mailforge/internal/render"
+	"github.com/lvim-tech/mailforge/internal/sidebar"
 	"github.com/lvim-tech/mailforge/internal/store"
 	"github.com/lvim-tech/mailforge/internal/sys"
 )
@@ -38,6 +39,7 @@ func Audit(c config.Config, reg account.Registry) Report {
 
 	auditOptions(&r, c)
 	auditTimer(&r, c)
+	auditSidebar(&r, c, reg)
 
 	// The seeded user files, also unconditionally: they are the ones neomuttrc sources, and
 	// FirstRun cannot put back one that was never written on this machine.
@@ -589,4 +591,92 @@ func hasSetting(path, name string) bool {
 // firstWord is the program a mailcap command runs.
 func firstWord(cmd string) string {
 	return strings.TrimSpace(strings.SplitN(strings.TrimSpace(cmd), " ", 2)[0])
+}
+
+/*
+auditSidebar checks the folded sidebar: the one generated file that is ALLOWED to differ from what
+an apply would write.
+
+That is why it gets a check of its own instead of checkOwned. sidebar.rc is rewritten by a keypress
+— that is the whole feature — so "differs from what would be generated now" is its normal state and
+reporting it would train the user to ignore the doctor.
+
+What can actually go wrong is different in kind: the file is missing, so the sidebar comes up empty;
+or `mailforge` is not where NeoMutt's shell can find it, so the key presses and nothing happens; or
+the setting was turned off and left a file behind that nothing sources.
+*/
+func auditSidebar(r *Report, c config.Config, reg account.Registry) {
+	sb := render.SidebarPath(c)
+
+	if !c.SidebarCollapse {
+		for _, gone := range []string{sb, render.InboxHookPath(c)} {
+			if _, err := os.Stat(gone); err == nil {
+				r.Findings = append(r.Findings, Finding{Warn, "sidebar",
+					gone + " is still there while folding is off, and nothing sources it",
+					"apply any account and it is removed"})
+			}
+		}
+		return
+	}
+
+	// The INBOX hook's file IS checked against what would be generated, unlike sidebar.rc below:
+	// it has one line and no state in it, so any difference is a hand edit that the next apply
+	// takes away. Missing, it is an error at every start from the hook that sources it.
+	checkOwned(r, "sidebar", render.InboxHookPath(c), render.InboxHookRC(c))
+
+	// Missing is a FAIL, not a warning: accounts.rc sources this file and registers no mailbox
+	// of its own, so without it NeoMutt starts with an empty sidebar and no error anywhere.
+	if _, err := os.Stat(sb); err != nil {
+		r.Findings = append(r.Findings, Finding{Fail, "sidebar",
+			sb + " is missing, and folding is on — the sidebar will be empty",
+			"apply any account, or run `mailforge sidebar render`"})
+	} else {
+		st := sidebar.Load()
+		r.Findings = append(r.Findings, Finding{OK, "sidebar",
+			fmt.Sprintf("folded — %d of %d accounts open", len(st.OpenSet()), len(reg.Accounts)), ""})
+	}
+
+	// Both halves of this feature run the program by name: the fold key through <shell-escape>
+	// and the folder-hook through a backtick. Found by this process is not proof it is found by
+	// NeoMutt's shell, but NOT being found here is proof enough that something is wrong.
+	if _, err := exec.LookPath("mailforge"); err != nil {
+		r.Findings = append(r.Findings, Finding{Warn, "sidebar",
+			"`mailforge` is not on PATH — Enter cannot fold anything and the folder-hook " +
+				"cannot say which account is open",
+			"put the binary somewhere on PATH, the same place `mailforge fetch` is found from"})
+	}
+
+	// An action in the Keys tab put on Enter. The fold macro is written at the END of keys.rc,
+	// so it is the one NeoMutt keeps — the row would show a key that does something else, which
+	// is the exact failure keys.Conflicts exists to prevent and cannot see here: the fold is a
+	// macro of its own, not a row in the table.
+	bound := keys.Fill(c.Keys)
+	for _, a := range keys.Actions() {
+		if a.Menu != "index" && a.Menu != "pager" {
+			continue
+		}
+		k := keys.Canonical(bound[a.Name()])
+		if k != "\n" && k != "\r" {
+			continue
+		}
+		r.Findings = append(r.Findings, Finding{Warn, "sidebar",
+			a.Name() + " is on Enter, and the fold key is written after it in keys.rc — " +
+				"folding wins and that row does nothing",
+			"give " + a.Name() + " another key, or turn folding off"})
+	}
+
+	// Enter is the fold key, and bindings.rc is read after keys.rc. Same shape as the keys
+	// audit, and worth its own line because the symptom is a key that opens mail instead of
+	// folding, which looks like the feature was never turned on.
+	if b, err := os.ReadFile(filepath.Join(c.NeomuttDir, "bindings.rc")); err == nil {
+		for _, k := range []string{`\n`, `\r`} {
+			if bindsIn(string(b), "index", k) {
+				r.Findings = append(r.Findings, Finding{Warn, "sidebar",
+					"your bindings.rc binds Enter in the index, and is read after keys.rc — " +
+						"it wins over the fold key",
+					"remove that line from bindings.rc, or keep it and fold with it instead"})
+				break
+			}
+		}
+	}
 }

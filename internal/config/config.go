@@ -130,6 +130,20 @@ type Config struct {
 	// the one that has to enable what the format needs.
 	SidebarCounts bool `json:"sidebar_counts"`
 
+	// SidebarCollapse folds every account down to one line, and gives Enter the job of opening
+	// and closing one of them.
+	//
+	// OFF by default, because turning it on takes Enter away from reading mail: the toggle has to
+	// sit on \n and \r, which are the keys NeoMutt opens a message with. <space> and
+	// <keypadenter> still open one, but a program that moved somebody's Enter on its own,
+	// because a new version happened to know how, would be making that call for them.
+	//
+	// The folded line counts its INBOX, not the whole account. NeoMutt cannot add several
+	// mailboxes into one row, and new mail lands in INBOX, so the number is right where it
+	// matters without being a total. Written down here because it is the part of this that looks
+	// most like a bug.
+	SidebarCollapse bool `json:"sidebar_collapse"`
+
 	// The three timers behind "when does the sidebar catch up", kept SEPARATE on purpose.
 	//
 	// NeoMutt nests them: it waits WakeEvery for a key, then looks for mail if CheckEvery has
@@ -353,6 +367,25 @@ func Path() string {
 		return "mailforge.json"
 	}
 	return filepath.Join(home, ".config", "mailforge", "config.json")
+}
+
+// StatePath is where mailforge keeps what it remembers BETWEEN runs without being told: which
+// accounts the sidebar has folded open, and which one is being read. Honours XDG_STATE_HOME.
+//
+// Not config.json, and the line is worth being clear about. config.json holds decisions — a
+// person sat down and chose an editor, an interval, a password layout — and it is a file they are
+// invited to read and hand-edit. A sidebar that folds open on a keypress changes ten times an
+// hour and nobody chose any single one of those states. Mixing the two would mean rewriting the
+// file of decisions on every keystroke, and a `git diff` of somebody's dotfiles full of noise.
+func StatePath() string {
+	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
+		return filepath.Join(d, "mailforge", "sidebar.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "mailforge-sidebar.json"
+	}
+	return filepath.Join(home, ".local", "state", "mailforge", "sidebar.json")
 }
 
 // ThemeDir is where mailforge looks for palette files, beside the config they belong with. One

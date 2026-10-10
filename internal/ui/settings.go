@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/lvim-tech/mailforge/internal/account"
 	"github.com/lvim-tech/mailforge/internal/config"
 	"github.com/lvim-tech/mailforge/internal/render"
 	"github.com/lvim-tech/mailforge/internal/setup"
@@ -204,6 +205,20 @@ var settings = []setting{
 		note: "the new/total numbers beside every mailbox. NeoMutt computes them only when this " +
 			"is on, and its own default is off — which shows counts for the open mailbox and " +
 			"nothing for the rest, and reads as a broken sidebar.",
+	},
+	{
+		label: "fold the sidebar",
+		kind:  skBool,
+		get:   func(v *settingsView) string { return yesno(v.cfg.SidebarCollapse) },
+		set: func(v *settingsView, _ string) error {
+			v.cfg.SidebarCollapse = !v.cfg.SidebarCollapse
+			return nil
+		},
+		note: "one line per account instead of one per folder, and Enter folds the account " +
+			"being read open or shut. It COSTS Enter: the toggle sits on the key NeoMutt opens " +
+			"a message with, so reading one is <space> or the keypad Enter afterwards. The " +
+			"folded line counts that account's INBOX, not the account — NeoMutt cannot add " +
+			"mailboxes together. Which accounts are open is remembered between runs.",
 	},
 	{
 		label: "wake every",
@@ -431,6 +446,7 @@ func (v *settingsView) save() tea.Cmd {
 	if err := config.Save(v.cfg); err != nil {
 		return failure("%v", err)
 	}
+	folded := v.saved.SidebarCollapse != v.cfg.SidebarCollapse
 	v.saved = v.cfg
 
 	// The theme is the one setting here that takes effect where it was changed rather than next
@@ -439,6 +455,30 @@ func (v *settingsView) save() tea.Cmd {
 
 	var p setup.Plan
 	setup.ApplyOptions(v.cfg, &p)
+
+	// Folding the sidebar is the one setting on this screen that reaches past options.rc, so it
+	// is the one that has to re-render more than options.rc. It binds a key, in keys.rc; it hands
+	// the mailbox list to sidebar.rc and takes it out of accounts.rc; and it adds a line to every
+	// account's own rc, which is what tells the fold key which account is being read.
+	//
+	// Only when it CHANGED, not on every save. Re-rendering fourteen account files to write an
+	// editor path is work nobody asked for, and the comment above about this not being the screen
+	// that rewrites accounts is still right for every other row here.
+	if folded {
+		reg, err := account.Load()
+		if err != nil {
+			return failure("%v", err)
+		}
+		for _, a := range reg.Accounts {
+			// nil secret: a re-render, not a password change.
+			p.Steps = append(p.Steps, setup.ApplyAccount(v.cfg, &reg, a, nil).Steps...)
+		}
+		// Explicitly, and not only through ApplyAccount: with no accounts at all there is no
+		// loop above, and sidebar.rc still has to be written or taken away.
+		setup.ApplyIndex(v.cfg, &reg, &p)
+		setup.ApplyKeys(v.cfg, &p)
+	}
+
 	for _, s := range p.Steps {
 		if s.Err != nil {
 			return failure("%v", s.Err)
