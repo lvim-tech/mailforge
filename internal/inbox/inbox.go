@@ -100,3 +100,87 @@ func readDir(dir string) []string {
 	}
 	return out
 }
+
+// Mailbox is one maildir's two numbers, as a sidebar row shows them.
+type Mailbox struct {
+	// Total is every message in the mailbox, read or not.
+	Total int
+	// Unread is what has not been read, counted the same way Unread does it.
+	Unread int
+}
+
+// Measure reads one maildir. NOT named Count, because Count is already the per-account figure in
+// this package and two things called the same name in one file is how the wrong one gets called.
+//
+// A directory that is not there is zero and no error: a folder the server has but mbsync has not
+// fetched yet is an empty row, which is what it is.
+func Measure(dir string) Mailbox {
+	m := Mailbox{}
+	for _, e := range readDir(filepath.Join(dir, "new")) {
+		if strings.HasPrefix(e, ".") {
+			continue
+		}
+		m.Total++
+		m.Unread++ // everything in new/ is unread by definition
+	}
+	for _, e := range readDir(filepath.Join(dir, "cur")) {
+		if strings.HasPrefix(e, ".") {
+			continue
+		}
+		m.Total++
+		if i := strings.LastIndex(e, ":2,"); i < 0 || !strings.ContainsRune(e[i+3:], 'S') {
+			m.Unread++
+		}
+	}
+	return m
+}
+
+/*
+Elsewhere is the unread mail of one account that is NOT in its INBOX.
+
+Every maildir under the account except INBOX, DISCOVERED on disk rather than taken from the
+registry's list of folders. The registry knows the five this program registers in the sidebar —
+Sent, Drafts, Trash, Archive, spam — and a server with a sixth under its own name, Junk being the
+common one here, would be silently left out of a number whose whole purpose is "unread you have not
+seen yet". A folder nobody registered is exactly where unseen mail hides.
+
+A maildir is recognised the way the format defines one: a directory holding cur or new.
+*/
+func Elsewhere(c config.Config, a account.Account) int {
+	root := a.Maildir(c)
+	n := 0
+	var walk func(dir string)
+	walk = func(dir string) {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range ents {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			sub := filepath.Join(dir, e.Name())
+			if e.Name() == "cur" || e.Name() == "new" || e.Name() == "tmp" {
+				continue
+			}
+			if isMaildir(sub) {
+				if sub != filepath.Join(root, "INBOX") {
+					n += Measure(sub).Unread
+				}
+			}
+			// Deeper regardless: "[Gmail]" is not a maildir itself but holds several.
+			walk(sub)
+		}
+	}
+	walk(root)
+	return n
+}
+
+func isMaildir(dir string) bool {
+	for _, half := range []string{"cur", "new"} {
+		if fi, err := os.Stat(filepath.Join(dir, half)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
+}

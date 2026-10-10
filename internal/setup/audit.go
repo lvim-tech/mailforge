@@ -153,8 +153,14 @@ func auditOptions(r *Report, c config.Config) {
 	// the case that cost an evening: the seeded `set editor = "$EDITOR"` sat in that file,
 	// expanded to nothing on a start that did not export it, and composing ended in an error
 	// naming a variable rather than a missing editor.
-	for _, name := range []string{"editor", "timeout", "mail_check", "mail_check_stats",
-		"mail_check_stats_interval", "wait_key"} {
+	managed := []string{"editor", "timeout", "mail_check", "mail_check_stats",
+		"mail_check_stats_interval", "wait_key", "sidebar_width"}
+	// sidebar_format only when folding owns it. Unfolded, the format is the user's business and
+	// warning about it would be telling them off for a line this program does not write.
+	if c.SidebarCollapse {
+		managed = append(managed, "sidebar_format")
+	}
+	for _, name := range managed {
 		if setsIn(c, name) {
 			r.Findings = append(r.Findings, Finding{Warn, "options",
 				"your settings.rc sets " + name + ", and is read after options.rc — what " +
@@ -617,6 +623,17 @@ func auditSidebar(r *Report, c config.Config, reg account.Registry) {
 			}
 		}
 		return
+	}
+
+	// The two files behind the live counts. refresh.rc is two fixed lines, so it is checked
+	// against what would be generated; counts.rc is rewritten every few seconds by the hook and
+	// only has to EXIST — without it the hook sources a missing file on every idle tick, which
+	// is an error line over the mailbox being read.
+	checkOwned(r, "sidebar", render.RefreshPath(c), render.RefreshRC(c))
+	if _, err := os.Stat(render.CountsPath(c)); err != nil {
+		r.Findings = append(r.Findings, Finding{Warn, "sidebar",
+			render.CountsPath(c) + " is missing — the counts stop refreshing until the next apply",
+			"apply any account, or run `mailforge sidebar counts`"})
 	}
 
 	// The INBOX hook's file IS checked against what would be generated, unlike sidebar.rc below:

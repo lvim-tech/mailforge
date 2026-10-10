@@ -121,6 +121,15 @@ type Config struct {
 	// HTMLViewerNone writes no rule and no auto_view at all.
 	HTMLViewer string `json:"html_viewer"`
 
+	// SidebarWidth is how many columns the sidebar gets.
+	//
+	// Managed here because the width and what is written into it are one decision. The labels
+	// carry the counts now — "SCHOOL-EXAMS.COM | BISERSTOILOV  16[1/3]" is thirty-nine columns —
+	// and a width chosen in another file turns the number this program went to the trouble of
+	// computing into a truncated label. The seed put 32 in the user's own settings.rc, where it
+	// beat anything set here, and the counts fell off the right edge.
+	SidebarWidth int `json:"sidebar_width"`
+
 	// SidebarCounts turns on NeoMutt's mail_check_stats.
 	//
 	// The seeded sidebar_format asks for %N and %S — new and total — and those two are computed
@@ -339,6 +348,7 @@ func Default() Config {
 		HTMLViewer: HTMLViewerAuto,
 		// On, and every minute. The cost is a stat of each maildir on a timer — cheap, because
 		// mbsync fetches into local directories and NeoMutt never asks a server for this.
+		SidebarWidth:       40,
 		SidebarCounts:      true,
 		SidebarCountsEvery: 5,
 		CheckEvery:         10,
@@ -466,6 +476,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Sync.MaxMessages < 0 {
 		c.Sync.MaxMessages = 0
+	}
+	if c.SidebarWidth <= 0 {
+		c.SidebarWidth = d.SidebarWidth
 	}
 	if c.VerifyTimeoutSec <= 0 {
 		c.VerifyTimeoutSec = d.VerifyTimeoutSec

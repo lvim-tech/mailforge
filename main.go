@@ -335,6 +335,7 @@ runSidebar folds accounts open and shut, and records which one is being read.
 
 	mailforge sidebar current <address>   a folder-hook, on every change of folder
 	mailforge sidebar inbox               a second hook, when the folder is an INBOX
+	mailforge sidebar counts              the timeout-hook, every few idle seconds
 	mailforge sidebar toggle [address]    the Enter macro, on a keypress
 	mailforge sidebar render              put the file back the way the state says
 
@@ -351,7 +352,7 @@ reported, not here.
 func runSidebar(c config.Config, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr,
-			"usage: mailforge sidebar current <address> | inbox | toggle [address] | render")
+			"usage: mailforge sidebar current <address> | inbox | counts | toggle [address] | render")
 		return 2
 	}
 
@@ -365,6 +366,27 @@ func runSidebar(c config.Config, args []string) int {
 
 	case "inbox":
 		_ = sidebar.SetCurrentIsInbox()
+		return 0
+
+	case "counts":
+		// The timeout-hook's half: recount the mail and rewrite the labels, nothing else. No
+		// unmailboxes, no push, no state written — see render.CountsRC for why re-registering
+		// the list here would fight the user for the sidebar's scroll position.
+		//
+		// Silent and zero even when it fails: this runs every few seconds from inside a client
+		// somebody is reading mail in, and a count that could not be taken is a stale number,
+		// not an incident. The doctor is where a missing file gets reported.
+		reg, err := account.Load()
+		if err != nil {
+			return 0
+		}
+		st := sidebar.Load()
+		body := render.CountsRC(c, reg.Accounts, st.OpenSet(), setup.SidebarCounts(c, reg.Accounts))
+		p := render.CountsPath(c)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return 0
+		}
+		_ = config.WriteAtomic(p, []byte(body), 0o600)
 		return 0
 
 	case "toggle":
@@ -426,7 +448,7 @@ func writeSidebar(c config.Config, st *sidebar.State) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	body := render.SidebarRC(c, reg.Accounts, st.OpenSet(), st.Current)
+	body := render.SidebarRC(c, reg.Accounts, st.OpenSet(), st.Current, setup.SidebarCounts(c, reg.Accounts))
 	if err := config.WriteAtomic(p, []byte(body), 0o600); err != nil {
 		return err
 	}

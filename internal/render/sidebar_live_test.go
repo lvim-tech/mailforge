@@ -36,7 +36,7 @@ func TestTheFoldedFilesLoadInTheRealNeoMutt(t *testing.T) {
 	accounts := []account.Account{hosted, gmail}
 	// One account open, one shut: the two states have different lines, and a file that loads in
 	// one of them is not a file that loads.
-	body := SidebarRC(c, accounts, map[string]bool{hosted.Address: true}, gmail.Address)
+	body := SidebarRC(c, accounts, map[string]bool{hosted.Address: true}, gmail.Address, nil)
 
 	// The maildirs have to exist before NeoMutt is asked to register them. Taken from the
 	// rendered file rather than rebuilt here, so the test cannot pass by creating directories

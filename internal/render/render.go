@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/lvim-tech/mailforge/internal/account"
 	"github.com/lvim-tech/mailforge/internal/config"
@@ -168,16 +170,27 @@ func AccountsRC(c config.Config, accounts []account.Account) string {
 	return b.String()
 }
 
-// mailboxLine lists the account's other mailboxes for the sidebar. Discovered names, not a
-// hardcoded litany — that is the whole reason Folders is a discovered field.
+// FolderNames is the account's other mailboxes, in the order the sidebar shows them. Discovered
+// names, not a hardcoded litany — that is the whole reason Folders is a discovered field.
+//
+// Exported because whoever counts the mail has to count the same mailboxes this file registers, and
+// a second list of folder names kept in step by hand is the drift this program exists to prevent.
+func FolderNames(a account.Account) []string {
+	var out []string
+	local := a.LocalFolders()
+	for _, f := range []string{local.Sent, local.Drafts, local.Trash, local.Archive, local.Spam} {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// mailboxLine lists those mailboxes as one registration line, for the unfolded sidebar.
 func mailboxLine(c config.Config, a account.Account) string {
 	var boxes []string
 	dir := a.Maildir(c)
-	local := a.LocalFolders()
-	for _, f := range []string{local.Sent, local.Drafts, local.Trash, local.Archive, local.Spam} {
-		if f == "" {
-			continue
-		}
+	for _, f := range FolderNames(a) {
 		boxes = append(boxes, quote(dir+"/"+f))
 	}
 	if len(boxes) == 0 {
@@ -334,7 +347,7 @@ NeoMutt computes per mailbox and has no notion of a group. New mail arrives in I
 is right where it is looked at — but it is not a total, and Sent or Archive moving under a fold take
 their counts with them.
 */
-func SidebarRC(c config.Config, accounts []account.Account, expanded map[string]bool, highlight string) string {
+func SidebarRC(c config.Config, accounts []account.Account, expanded map[string]bool, highlight string, counts map[string]SidebarCount) string {
 	var b strings.Builder
 	b.WriteString(Header)
 	b.WriteString("# Rewritten again, outside any apply, by `mailforge sidebar toggle`.\n")
@@ -350,27 +363,184 @@ func SidebarRC(c config.Config, accounts []account.Account, expanded map[string]
 	sorted := append([]account.Account(nil), accounts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
 
-	// row counts the sidebar lines as they are written, because the push at the bottom is a
-	// number of steps down a list that only this loop knows the shape of: an account's row sits
-	// after the folders of every unfolded account above it.
-	row, want := 0, 0
-	for _, a := range sorted {
-		dir := a.Maildir(c)
-		row++
-		if a.Address == highlight {
-			want = row
+	rows := SidebarRows(c, sorted, expanded, counts)
+	for _, r := range rows {
+		fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(r.Label), quote(r.Path))
+	}
+
+	// The push is a number of steps down the list, so it is counted off the rows that were just
+	// written rather than worked out again: an account's row sits after the folders of every
+	// unfolded account above it.
+	want := 0
+	for i, r := range rows {
+		if r.Address == highlight && r.IsAccount {
+			want = i + 1
+			break
 		}
-		fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(a.LabelOrDefault()), quote(dir+"/INBOX"))
+	}
+	b.WriteString(sidebarHighlight(want))
+	return b.String()
+}
+
+// SidebarCount is what one row's numbers are. Elsewhere is filled for account rows only.
+type SidebarCount struct {
+	// Total is every message in this mailbox.
+	Total int
+	// Unread is what has not been read in this mailbox.
+	Unread int
+	// Elsewhere is unread mail in the REST of the account — every maildir of it except INBOX,
+	// spam and anything the server named itself included. It is the number NeoMutt cannot
+	// produce: its own expandos are per mailbox and it has no notion of a group.
+	Elsewhere int
+}
+
+// SidebarRow is one line of the sidebar, label and all.
+type SidebarRow struct {
+	Label   string
+	Path    string
+	Address string
+	// IsAccount separates an account's own row — which is its INBOX — from a folder under it.
+	IsAccount bool
+}
+
+/*
+SidebarRows is the sidebar as text: one row per registered mailbox, numbers included.
+
+THE NUMBERS ARE IN THE LABEL, and that is the whole reason this function exists. NeoMutt's
+sidebar_format can only print what it knows about one mailbox, so "16[1/3]" — sixteen messages, one
+unread here, three unread elsewhere in this account — is not something it can be asked for. Written
+into the label it is just text, and the label is ours.
+
+The price is that every number on the row has to come from here, including the ones NeoMutt would
+have been happy to print: with a count in the label AND %S in the format, each row would carry two
+sets of figures. So options.rc sets sidebar_format to %D alone when folding is on, and the padding
+below is what right-aligns the numbers that NeoMutt's %* used to.
+
+Folders are registered with named-mailboxes rather than mailboxes for the same reason: a label is
+the only place a number can go. Two spaces of indent, which also replaces what sidebar_short_path
+was doing — the label is no longer a path, so there is nothing left to shorten.
+*/
+func SidebarRows(c config.Config, accounts []account.Account, expanded map[string]bool, counts map[string]SidebarCount) []SidebarRow {
+	var out []SidebarRow
+	for _, a := range accounts {
+		dir := a.Maildir(c)
+		path := dir + "/INBOX"
+		n := counts[path]
+		out = append(out, SidebarRow{
+			Label:     sidebarLabel(c.SidebarWidth, a.LabelOrDefault(), accountFigure(n)),
+			Path:      path,
+			Address:   a.Address,
+			IsAccount: true,
+		})
 		if !expanded[a.Address] {
 			continue
 		}
-		if boxes := mailboxLine(c, a); boxes != "" {
-			b.WriteString(boxes + "\n")
-			row += strings.Count(boxes, "\" \"") + 1
+		for _, f := range FolderNames(a) {
+			p := dir + "/" + f
+			fn := counts[p]
+			out = append(out, SidebarRow{
+				Label:   sidebarLabel(c.SidebarWidth, "  "+f, folderFigure(fn)),
+				Path:    p,
+				Address: a.Address,
+			})
 		}
 	}
+	return out
+}
 
-	b.WriteString(sidebarHighlight(want))
+// accountFigure is "16" with nothing unread, "16[1/3]" with one unread here and three elsewhere.
+//
+// The brackets appear only when something is unread, because a column of [0/0] beside every account
+// is noise that makes the one row that matters harder to find.
+func accountFigure(n SidebarCount) string {
+	if n.Unread == 0 && n.Elsewhere == 0 {
+		return strconv.Itoa(n.Total)
+	}
+	return fmt.Sprintf("%d[%d/%d]", n.Total, n.Unread, n.Elsewhere)
+}
+
+// folderFigure is the same for a folder, which has no elsewhere of its own.
+func folderFigure(n SidebarCount) string {
+	if n.Unread == 0 {
+		return strconv.Itoa(n.Total)
+	}
+	return fmt.Sprintf("%d[%d]", n.Total, n.Unread)
+}
+
+// sidebarLabel pads the text so the figure sits at the right edge of the sidebar.
+//
+// One column short of the width: the last one is NeoMutt's divider, and a label that reaches it has
+// its final character eaten. At least one space always, so a label too long to fit is truncated by
+// NeoMutt with its number still attached rather than running into it.
+func sidebarLabel(width int, text, figure string) string {
+	pad := width - 1 - utf8.RuneCountInString(text) - utf8.RuneCountInString(figure)
+	if pad < 1 {
+		pad = 1
+	}
+	return text + strings.Repeat(" ", pad) + figure
+}
+
+/*
+CountsRC is the same rows WITHOUT the registration ritual: labels only.
+
+It exists because of what a label change does and does not cost. `named-mailboxes` on a path that is
+already registered UPDATES that row in place — measured in a running client: the label changed, no
+row was duplicated, the order held, the view did not scroll and the highlight stayed where the user
+had left it. Sourced from a timeout-hook every few seconds, that is a live count.
+
+What must NOT be in this file is `unmailboxes *`, and the reason is the same measurement from the
+other side: registering the list afresh scrolls the open mailbox to the top of the sidebar. A
+refresh that did that every five seconds would fight the user for the scroll position and win.
+
+The row SET has to match sidebar.rc exactly, which is why this takes the same expanded map. A row
+named here that is not registered there would be ADDED by the refresh — folders of a folded account
+appearing at the bottom of the list, which is what happened the first time this was tried.
+*/
+func CountsRC(c config.Config, accounts []account.Account, expanded map[string]bool, counts map[string]SidebarCount) string {
+	var b strings.Builder
+	b.WriteString(Header)
+	b.WriteString("# Rewritten by `mailforge sidebar counts`, which the timeout-hook runs.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Labels only, and deliberately no `unmailboxes`: re-registering the list would\n")
+	b.WriteString("# scroll the open mailbox to the top every time this is read.\n\n")
+
+	sorted := append([]account.Account(nil), accounts...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
+	for _, r := range SidebarRows(c, sorted, expanded, counts) {
+		fmt.Fprintf(&b, "named-mailboxes %s %s\n", quote(r.Label), quote(r.Path))
+	}
+	return b.String()
+}
+
+// CountsPath is the file CountsRC is written to.
+func CountsPath(c config.Config) string {
+	return filepath.Join(c.NeomuttDir, "mailforge", "counts.rc")
+}
+
+// RefreshPath is the file the timeout-hook sources.
+func RefreshPath(c config.Config) string {
+	return filepath.Join(c.NeomuttDir, "mailforge", "refresh.rc")
+}
+
+/*
+RefreshRC is two lines, and it is the only way NeoMutt can be made to ask a question periodically.
+
+A timeout-hook runs a muttrc COMMAND, and a backtick in a hook's command is expanded when the hook
+line is parsed rather than when it fires — measured, so a hook that counted mail would have counted
+it once at startup and never again. A hook that SOURCES A FILE re-reads that file every time it
+fires, and a backtick inside the file is evaluated then. So the counting goes in a file.
+
+The first line runs the program for its effect and throws the value away; the second reads what it
+just wrote.
+*/
+func RefreshRC(c config.Config) string {
+	var b strings.Builder
+	b.WriteString(HeaderFromConfig)
+	b.WriteString("#\n")
+	b.WriteString("# Sourced by a timeout-hook, which NeoMutt runs when $timeout passes with no\n")
+	b.WriteString("# keypress. The backtick recounts the mail; the source line shows the result.\n\n")
+	b.WriteString("set my_mailforge_counts = `mailforge sidebar counts`\n")
+	fmt.Fprintf(&b, "source %s\n", CountsPath(c))
 	return b.String()
 }
 

@@ -42,6 +42,21 @@ func OptionsRC(c config.Config) string {
 	} else {
 		b.WriteString("unset mail_check_stats   # the sidebar's %N and %S have nothing to count\n")
 	}
+	// The sidebar's own two settings, beside the counts they govern.
+	fmt.Fprintf(&b, "set sidebar_width = %d\n", c.SidebarWidth)
+	if c.SidebarCollapse {
+		// %D ALONE, because the label already carries the numbers. Folded, a row has to show a
+		// figure NeoMutt cannot compute — unread in the rest of the account — so mailforge
+		// writes every number into the label it owns. Leaving %S or %N in the format would
+		// print a second set of figures beside the first on every row.
+		b.WriteString("set sidebar_format = \"%D\"   # the numbers are in the label; see mailforge/counts.rc\n")
+		// And this is what keeps them current. NeoMutt runs a timeout-hook when $timeout
+		// passes with no keypress; the file it sources recounts the mail and re-labels the
+		// rows in place, which — measured in a running client — moves neither the scroll nor
+		// the highlight.
+		fmt.Fprintf(&b, "timeout-hook \"source %s\"\n", RefreshPath(c))
+	}
+
 	// The three nested timers, written together because they are read together: NeoMutt waits
 	// `timeout` for a key, then looks for mail if `mail_check` has elapsed, and only inside that
 	// look are the counts recomputed if `mail_check_stats_interval` has. Each is a ceiling over

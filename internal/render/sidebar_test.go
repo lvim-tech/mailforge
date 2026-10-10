@@ -13,7 +13,7 @@ func TestSidebarRCFoldsEveryAccountToOneLine(t *testing.T) {
 	c, hosted, gmail := fixtures()
 	c.SidebarCollapse = true
 
-	got := SidebarRC(c, []account.Account{hosted, gmail}, nil, "")
+	got := SidebarRC(c, []account.Account{hosted, gmail}, nil, "", nil)
 
 	if !strings.Contains(got, "\nunmailboxes *\n") {
 		t.Error("the list does not start by clearing the old one, so a fold would append to it")
@@ -34,7 +34,7 @@ func TestSidebarRCOpensOnlyWhatTheStateNames(t *testing.T) {
 	c, hosted, gmail := fixtures()
 	c.SidebarCollapse = true
 
-	got := SidebarRC(c, []account.Account{hosted, gmail}, map[string]bool{hosted.Address: true}, "")
+	got := SidebarRC(c, []account.Account{hosted, gmail}, map[string]bool{hosted.Address: true}, "", nil)
 
 	if !strings.Contains(got, "/hello@example.com/Sent") {
 		t.Error("the open account did not register its folders")
@@ -55,7 +55,7 @@ func TestSidebarRCIgnoresAnAccountThatIsGone(t *testing.T) {
 	c, hosted, _ := fixtures()
 	c.SidebarCollapse = true
 
-	got := SidebarRC(c, []account.Account{hosted}, map[string]bool{"deleted@example.com": true}, "")
+	got := SidebarRC(c, []account.Account{hosted}, map[string]bool{"deleted@example.com": true}, "", nil)
 
 	if strings.Contains(got, "deleted@example.com") {
 		t.Error("an address with no account behind it reached the file")
@@ -180,30 +180,131 @@ func TestSidebarRCWalksTheHighlightBack(t *testing.T) {
 	accounts := []account.Account{hosted, gmail}
 
 	// Nothing to go back to: no push at all, rather than a highlight moved for no reason.
-	if got := SidebarRC(c, accounts, nil, ""); strings.Contains(got, "push ") {
+	if got := SidebarRC(c, accounts, nil, "", nil); strings.Contains(got, "push ") {
 		t.Error("pushed a highlight with no account to put it on")
 	}
 
 	// The FIRST account is row one, so <sidebar-first> alone.
-	got := SidebarRC(c, accounts, nil, hosted.Address)
+	got := SidebarRC(c, accounts, nil, hosted.Address, nil)
 	if !strings.Contains(got, "push \"<sidebar-first>\"\n") {
 		t.Errorf("row one should need no steps:\n%s", got)
 	}
 
 	// The second account, with the first FOLDED: row two.
-	got = SidebarRC(c, accounts, nil, gmail.Address)
+	got = SidebarRC(c, accounts, nil, gmail.Address, nil)
 	if n := strings.Count(got, "<sidebar-next>"); n != 1 {
 		t.Errorf("got %d steps to the second row, want 1", n)
 	}
 
 	// The second account with the first UNFOLDED: its five folders sit in between. Gmail's
 	// folders include "[Gmail]/Sent Mail", whose space must not be counted as another mailbox.
-	got = SidebarRC(c, accounts, map[string]bool{hosted.Address: true}, gmail.Address)
+	got = SidebarRC(c, accounts, map[string]bool{hosted.Address: true}, gmail.Address, nil)
 	want := strings.Count(mailboxLine(c, hosted), "\" \"") + 1 + 1
 	if n := strings.Count(got, "<sidebar-next>"); n != want {
 		t.Errorf("got %d steps past an unfolded account, want %d", n, want)
 	}
 	if want != 5 {
 		t.Fatalf("the fixture changed: %d folders above, so this test is not measuring what it says", want-1)
+	}
+}
+
+// TestTheFigureIsWhatWasAskedFor pins the format, because it is the whole point of writing the
+// numbers into the label: "16[1/3]" is sixteen messages, one unread here, three unread elsewhere in
+// the account — and the third of those is the one NeoMutt has no expando for.
+func TestTheFigureIsWhatWasAskedFor(t *testing.T) {
+	for _, tc := range []struct {
+		n    SidebarCount
+		want string
+	}{
+		{SidebarCount{Total: 16}, "16"},
+		{SidebarCount{Total: 16, Unread: 1, Elsewhere: 3}, "16[1/3]"},
+		// Unread only elsewhere still shows both halves: a bare "16" would say the account is
+		// read when three messages in its folders are not.
+		{SidebarCount{Total: 16, Elsewhere: 3}, "16[0/3]"},
+		{SidebarCount{Total: 0, Unread: 0}, "0"},
+	} {
+		if got := accountFigure(tc.n); got != tc.want {
+			t.Errorf("accountFigure(%+v) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+	// A folder has no elsewhere of its own, and an Elsewhere set on one must not leak into its
+	// figure.
+	if got := folderFigure(SidebarCount{Total: 13, Unread: 2, Elsewhere: 9}); got != "13[2]" {
+		t.Errorf("folderFigure = %q, want 13[2]", got)
+	}
+	if got := folderFigure(SidebarCount{Total: 13}); got != "13" {
+		t.Errorf("folderFigure = %q, want 13", got)
+	}
+}
+
+// TestTheFigureSitsAtTheRightEdge: with sidebar_format down to %D, the padding in the label is the
+// only thing aligning the numbers, and one column has to be left for NeoMutt's divider.
+func TestTheFigureSitsAtTheRightEdge(t *testing.T) {
+	got := sidebarLabel(40, "MOTION-AGENCY.COM | HELLO", "16[1/3]")
+	if len(got) != 39 {
+		t.Errorf("label is %d columns, want 39 — one short of the width", len(got))
+	}
+	if !strings.HasSuffix(got, "16[1/3]") {
+		t.Errorf("the figure is not at the end: %q", got)
+	}
+
+	// A label with no room left keeps its figure and one space rather than running into it.
+	long := sidebarLabel(12, "A-VERY-LONG-ACCOUNT-LABEL", "9")
+	if !strings.HasSuffix(long, " 9") {
+		t.Errorf("a too-long label lost its figure: %q", long)
+	}
+}
+
+// TestCountsRCRelabelsWithoutReRegistering is the file the timeout-hook reads, and the two things
+// that must NOT be in it are what make a live refresh possible at all: `unmailboxes *` would scroll
+// the open mailbox to the top every few seconds, and a push would drag the highlight with it.
+func TestCountsRCRelabelsWithoutReRegistering(t *testing.T) {
+	c, hosted, gmail := fixtures()
+	c.SidebarCollapse = true
+	accounts := []account.Account{hosted, gmail}
+	expanded := map[string]bool{hosted.Address: true}
+	got := CountsRC(c, accounts, expanded, nil)
+	// Per LINE, the way NeoMutt reads it: the file explains in a comment that it deliberately
+	// has no unmailboxes, and a substring search finds that sentence and calls it a command.
+	for _, line := range strings.Split(got, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "unmailboxes") {
+			t.Error("the refresh clears the mailbox list, which scrolls the sidebar to the open row")
+		}
+		if strings.HasPrefix(line, "push ") {
+			t.Error("the refresh pushes the highlight, which would move it under the user's hands")
+		}
+	}
+
+	// The SAME rows as the real list, or the refresh adds what it names: folders of a folded
+	// account appearing at the bottom, which is what happened the first time this was tried.
+	full := SidebarRC(c, accounts, expanded, "", nil)
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, "named-mailboxes ") {
+			continue
+		}
+		if !strings.Contains(full, line) {
+			t.Errorf("the refresh names a row the list does not have:\n%s", line)
+		}
+	}
+	if a, b := strings.Count(got, "named-mailboxes "), strings.Count(full, "named-mailboxes "); a != b {
+		t.Errorf("refresh has %d rows, the list has %d", a, b)
+	}
+}
+
+// TestRefreshRCCountsThenShows covers the ordering the hook depends on: a backtick in a hook's own
+// command runs when the hook is PARSED, so the counting has to live in a sourced file, where it runs
+// each time the file is read — and the result has to be read after it is written.
+func TestRefreshRCCountsThenShows(t *testing.T) {
+	c, _, _ := fixtures()
+	got := RefreshRC(c)
+
+	count := strings.Index(got, "`mailforge sidebar counts`")
+	show := strings.Index(got, "source "+CountsPath(c))
+	if count < 0 || show < 0 {
+		t.Fatalf("the refresh is missing one of its two halves:\n%s", got)
+	}
+	if count > show {
+		t.Error("the labels are read before they are written, so every refresh shows the previous one")
 	}
 }

@@ -195,6 +195,23 @@ var settings = []setting{
 			"reports it. none leaves HTML mail as an attachment, opened with v.",
 	},
 	{
+		label: "sidebar width",
+		kind:  skInt,
+		get:   func(v *settingsView) string { return strconv.Itoa(v.cfg.SidebarWidth) },
+		set: func(v *settingsView, s string) error {
+			n, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil || n < 10 {
+				return fmt.Errorf("a number of columns, at least 10")
+			}
+			v.cfg.SidebarWidth = n
+			return nil
+		},
+		note: "how many columns the sidebar gets. It is managed here because the width and what " +
+			"is written into it are one decision: folded, the labels carry the counts — " +
+			"\"SCHOOL-EXAMS.COM | BISERSTOILOV  16[1/3]\" is thirty-nine columns — and a width " +
+			"set elsewhere truncates the number instead of the label.",
+	},
+	{
 		label: "sidebar counts",
 		kind:  skBool,
 		get:   func(v *settingsView) string { return yesno(v.cfg.SidebarCounts) },

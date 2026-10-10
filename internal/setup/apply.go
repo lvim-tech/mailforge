@@ -316,12 +316,24 @@ func ApplyIndex(c config.Config, r *account.Registry, p *Plan) {
 			if err := st.Save(); err != nil {
 				return "", err
 			}
-			body := render.SidebarRC(c, r.Accounts, st.OpenSet(), st.Current)
+			body := render.SidebarRC(c, r.Accounts, st.OpenSet(), st.Current, SidebarCounts(c, r.Accounts))
 			if same, err := unchanged(sb, body); err == nil && same {
 				return "already up to date", nil
 			}
 			return "written", config.WriteAtomic(sb, []byte(body), 0o600)
 		})
+		// The labels-only twin of sidebar.rc, written here because it lists the same rows from
+		// the same registry. The timeout-hook rewrites it every few seconds; this write is what
+		// puts it there at all, so a freshly applied machine has one before the first hook.
+		cf := render.CountsPath(c)
+		run("write "+cf, func() (string, error) {
+			body := render.CountsRC(c, r.Accounts, sidebar.Load().OpenSet(), SidebarCounts(c, r.Accounts))
+			if same, err := unchanged(cf, body); err == nil && same {
+				return "already up to date", nil
+			}
+			return "written", config.WriteAtomic(cf, []byte(body), 0o600)
+		})
+
 		// The INBOX hook's file, written on the same run for the same reason mailcap is written
 		// beside options.rc: without it the hook in accounts.rc sources a file that is not there,
 		// which is an error banner at every start, and Enter cannot tell an account's row from a
@@ -335,7 +347,7 @@ func ApplyIndex(c config.Config, r *account.Registry, p *Plan) {
 			return "written", config.WriteAtomic(ih, []byte(body), 0o600)
 		})
 	} else {
-		for _, gone := range []string{sb, render.InboxHookPath(c)} {
+		for _, gone := range []string{sb, render.CountsPath(c), render.InboxHookPath(c)} {
 			p := gone
 			run("remove "+p, func() (string, error) {
 				if err := os.Remove(p); err != nil {
@@ -440,6 +452,29 @@ func ApplyOptions(c config.Config, p *Plan) {
 		}
 		return "written", config.WriteAtomic(of, []byte(body), 0o600)
 	})
+
+	// The refresh file the timeout-hook sources, beside options.rc because it is a function of
+	// the config alone — two lines, one of which is this program's own path.
+	rf := render.RefreshPath(c)
+	if c.SidebarCollapse {
+		Write(p, "write "+rf, func() (string, error) {
+			body := render.RefreshRC(c)
+			if same, err := unchanged(rf, body); err == nil && same {
+				return "already up to date", nil
+			}
+			return "written", config.WriteAtomic(rf, []byte(body), 0o600)
+		})
+	} else {
+		Write(p, "remove "+rf, func() (string, error) {
+			if err := os.Remove(rf); err != nil {
+				if os.IsNotExist(err) {
+					return "was not there", nil
+				}
+				return "", err
+			}
+			return "deleted", nil
+		})
+	}
 
 	// mailforge's own mailcap, beside options.rc and written on the same run: the auto_view
 	// line above is worth nothing without a rule for it to reach, and a version of this program
